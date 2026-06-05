@@ -1,0 +1,26 @@
+&bio_run
+  ! Ensemble
+  n_ensemble      = 20
+  seed_base       = 42
+
+  ! Atmosphere
+  n_levels        = 106        ! altitude grid points (0 to 105 km)
+
+  ! Organism lifecycle
+  n_init_orgs     = 100        ! initial population per member
+  m_init          = 1.0e-12    ! initial organism mass [kg]  (= 1e-9 g)
+  halflife        = 30.0       ! organism half-life [days]
+  growth_rate_day = 0.70       ! max fractional growth rate [/day]
+  b_total_kg      = 1.0e-6    ! atmospheric nutrient pool [kg]  (b_factor scales this)
+  b_factor        = 1.0        ! biomass scaling (1 = default, 3 = population increase test)
+
+  ! Atmospheric dynamics
+  v_conv          = 1.0        ! convective velocity [m/s]  (= 100 cm/s, control run)
+
+  ! Numerical
+  dt_hrs          = 6.0        ! timestep [hours]
+  t_sim_years     = 100.0      ! simulation length [years]
+
+  ! Output
+  outdir          = 'output'
+/
