@@ -55,7 +55,7 @@ program bio_driver
   b_factor        = BFAC_DEF
   b_total_kg      = B_REF_KG
   growth_rate_day = GRWTH_DEF
-  tau_conv_s      = TAU_CONV_DEF
+  tau_conv_s      = 7000.0d0
   outdir          = 'output'
 
   ! ---- Read namelist if provided ----
@@ -85,8 +85,7 @@ program bio_driver
   write(*,'(a,f8.2,a)') ' v_conv           : ', v_conv,          ' m/s'
   write(*,'(a,f8.2,a)') ' Half-life        : ', halflife,        ' days'
   write(*,'(a,f8.2,a)') ' growth_rate_day  : ', growth_rate_day, ' /day'
-  write(*,'(a,1pe10.3,a)') ' biomass pool    : ', b_total_kg*b_factor, ' kg'
-  write(*,'(a,1pe10.3,a)') ' tau_conv        : ', tau_conv_s,          ' s'
+  write(*,'(a,1pe10.3,a)') ' biomass pool    : ', b_total_kg*b_factor, ' kg (conserved)'
   write(*,'(a,f8.2,a)') ' Timestep         : ', dt_hrs,          ' hours'
   write(*,'(a,f8.1,a)') ' Sim length       : ', t_sim_years,     ' years'
   write(*,'(a,i8)')     ' Total steps      : ', n_steps
@@ -110,7 +109,7 @@ program bio_driver
     call random_seed(put=seed)
 
     call bio_init_run(n_init_orgs, m_init, v_conv, halflife, &
-                      dt_hrs, b_total_kg, b_factor, growth_rate_day, tau_conv_s)
+                      dt_hrs, b_total_kg, b_factor, growth_rate_day)
 
     ! Open output files for this member
     write(fname,'(a,"/ensemble_",i3.3,"_state.dat")') trim(outdir), iens

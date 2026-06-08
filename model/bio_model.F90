@@ -22,6 +22,10 @@
 ! Timestep order (per Yates Sect. 2.2): eat -> move -> AHZ check ->
 !                                        reproduce -> age/die
 !
+! Biomass is conserved: organisms consume from the pool and return their
+! mass to the pool on death.  Returned biomass is redistributed across all
+! AHZ levels in proportion to organism mass per level (Yates Sect. 2.2).
+!
 ! Units: SI throughout (m, kg, s, K)
 !======================================================================
 module bio_model
@@ -41,19 +45,22 @@ module bio_model
 
   integer, save :: n_slots    ! allocated array length
   integer, save :: n_orgs     ! current live count
-  integer, save :: n_free     ! number of vacant slots (n_free = n_slots - n_orgs)
+  integer, save :: n_free     ! number of vacant slots (n_slots - n_orgs)
 
   ! ---- Biomass field ----
   real(8), allocatable, save :: biomass(:)     ! [kg] per atmosphere level
 
+  ! ---- Per-level scratch array for redistribution ----
+  real(8), allocatable, save :: mass_per_lev(:)   ! sum of org_mass in each level [kg]
+
+  ! ---- Biomass returned by dead organisms this timestep ----
+  real(8), save :: B_returned_step
+
   ! ---- Run parameters (set in bio_init_run) ----
-  real(8), save :: v_conv_ms     ! convective velocity [m/s]  (sets diffusion scale)
+  real(8), save :: v_conv_ms     ! convective velocity [m/s]
   real(8), save :: halflife_days
   real(8), save :: dt_s          ! timestep [s]
   real(8), save :: growth_rate   ! max fractional growth rate [/day]
-  real(8), save :: D_conv        ! vertical diffusivity [m^2/s]  = v_conv^2 * tau_conv
-  real(8), save :: sigma_dz      ! std dev of convective displacement per step [m]
-  real(8), save :: B_renew_per_lev  ! per-level biomass renewal per step [kg]
 
 contains
 
@@ -128,13 +135,13 @@ contains
   end subroutine add_organism
 
   !--------------------------------------------------------------------
-  ! Kill organism at index i; return its mass to the biomass pool
+  ! Kill organism at index i; accumulate its mass for redistribution.
+  ! Biomass is NOT returned locally; it goes into B_returned_step and
+  ! is redistributed globally at the end of bio_step (Yates Sect. 2.2).
   !--------------------------------------------------------------------
   subroutine kill_organism(i)
     integer, intent(in) :: i
-    integer :: lev
-    lev = atm_level(org_z(i))
-    biomass(lev)  = biomass(lev) + org_mass(i)
+    B_returned_step = B_returned_step + org_mass(i)
     org_alive(i)  = .false.
     n_orgs        = n_orgs - 1
     n_free        = n_free + 1
@@ -142,9 +149,6 @@ contains
 
   !--------------------------------------------------------------------
   ! Neutral-buoyancy mass for a solid sphere (G=0) at given atmosphere
-  ! v_conv = GRAV*(2/9)*R^2*rho_org/(nu*rho_gas)  =>
-  ! R_eq = sqrt(v_conv*9*nu*rho_gas / (2*GRAV*rho_org))
-  ! m_eq = rho_org*(4pi/3)*R_eq^3
   !--------------------------------------------------------------------
   pure function neutral_buoyancy_mass(v_conv, nu, rho_gas, rho_org) result(m_eq)
     real(8), intent(in) :: v_conv, nu, rho_gas, rho_org
@@ -155,14 +159,12 @@ contains
 
   !--------------------------------------------------------------------
   ! Initialise one ensemble member
-  ! b_ref_kg: reference biomass pool size [kg] (independent of n_init)
-  ! b_factor: multiplier on b_ref_kg (= 1 for control, = 3 for B-sensitivity)
   !--------------------------------------------------------------------
   subroutine bio_init_run(n_init, m_init, v_conv, halflife, dt_hrs, &
-                          b_ref_kg, b_factor, grwth, tau_conv)
+                          b_ref_kg, b_factor, grwth)
     integer, intent(in) :: n_init
     real(8), intent(in) :: m_init, v_conv, halflife, dt_hrs
-    real(8), intent(in) :: b_ref_kg, b_factor, grwth, tau_conv
+    real(8), intent(in) :: b_ref_kg, b_factor, grwth
     integer  :: i
     real(8)  :: u, z0, G0, rho0, B_total
 
@@ -170,9 +172,7 @@ contains
     halflife_days = halflife
     dt_s         = dt_hrs * 3600.0d0
     growth_rate  = grwth
-    D_conv       = 0.5d0 * v_conv**2 * tau_conv     ! Einstein D: <x^2>=2Dt, D=v^2*tau/2
-    sigma_dz     = sqrt(2.0d0 * D_conv * dt_s)     ! = v_conv * sqrt(tau_conv * dt_s)
-    B_renew_per_lev = b_ref_kg * b_factor / real(n_lev, 8)
+    B_returned_step = 0.0d0
 
     ! Allocate / reset organism arrays
     n_slots = MAX_ORGS
@@ -186,12 +186,13 @@ contains
     n_orgs    = 0
     n_free    = n_slots
 
-    ! Biomass: total = b_ref_kg * b_factor, evenly distributed over levels.
-    ! b_ref_kg is the atmospheric nutrient reservoir (independent of n_init).
-    if (allocated(biomass)) deallocate(biomass)
-    allocate(biomass(n_lev))
+    ! Biomass pool: conserved total = b_ref_kg * b_factor, spread evenly.
+    if (allocated(biomass))      deallocate(biomass)
+    if (allocated(mass_per_lev)) deallocate(mass_per_lev)
+    allocate(biomass(n_lev), mass_per_lev(n_lev))
     B_total  = b_ref_kg * b_factor
     biomass  = B_total / real(n_lev, 8)
+    mass_per_lev = 0.0d0
 
     ! Seed initial organisms with random properties throughout the AHZ
     do i = 1, n_init
@@ -213,9 +214,14 @@ contains
     real(8)  :: v_sed, dz, dB
     real(8)  :: G_c, rho_c, mrepr_c
     real(8)  :: u, p_death, noise
+    real(8)  :: total_org_mass
 
     n_born  = 0
     n_died  = 0
+    B_returned_step = 0.0d0
+    ! Accumulate mass_per_lev and total_org_mass in-loop to avoid a second O(n_slots) pass.
+    mass_per_lev   = 0.0d0
+    total_org_mass = 0.0d0
 
     ! Per-timestep death probability from exponential decay with half-life
     p_death = 1.0d0 - 2.0d0**(-dt_s / (halflife_days * SEC_PER_DAY))
@@ -228,8 +234,6 @@ contains
       call atm_rhovisc(org_z(i), rho_loc, nu_loc)
 
       ! -- 1. Eat (growth from biomass pool) --
-      ! Each organism consumes at most growth_rate*(dt/day)*own_mass,
-      ! and at most half the local pool to avoid monopolising a level
       if (biomass(lev) > 0.0d0) then
         dB = min(growth_rate * (dt_s / SEC_PER_DAY) * org_mass(i), &
                  0.5d0 * biomass(lev))
@@ -239,15 +243,12 @@ contains
       end if
 
       ! -- 2. Move: constant upward convection + sedimentation (Yates 2017 Sect. 2.2) --
-      ! Net velocity = v_conv (upward) + v_sed (downward).
-      ! Organisms near neutral buoyancy (v_sed ≈ -v_conv) achieve near-zero net drift.
       v_sed    = sedimentation_vel(org_mass(i), org_radius(i), &
                                    org_rho(i), rho_loc, nu_loc)
       dz       = (v_conv_ms + v_sed) * dt_s
       org_z(i) = org_z(i) + dz
 
-      ! -- 3. AHZ boundary check (altitude is equivalent to T-check
-      !        for the linear profile used here) --
+      ! -- 3. AHZ boundary check --
       if (org_z(i) < 0.0d0 .or. org_z(i) > Z_AHZ_TOP) then
         call kill_organism(i)
         n_died = n_died + 1
@@ -281,16 +282,31 @@ contains
       if (u < p_death) then
         call kill_organism(i)
         n_died = n_died + 1
+        cycle
       end if
 
+      ! Organism survived this step: accumulate for redistribution weighting.
+      lev = atm_level(org_z(i))
+      mass_per_lev(lev) = mass_per_lev(lev) + org_mass(i)
+      total_org_mass    = total_org_mass    + org_mass(i)
+
     end do
 
-    ! -- 6. Biomass renewal (chemostat: atmosphere continuously resupplies nutrients).
-    !       Each step each level receives B_renew_per_lev kg from photochemistry;
-    !       cap at 2x prevents unbounded accumulation from organism deaths.
-    do lev = 1, n_lev
-      biomass(lev) = min(biomass(lev) + B_renew_per_lev, 2.0d0 * B_renew_per_lev)
-    end do
+    ! -- 6. Redistribute returned biomass (Yates Sect. 2.2).
+    !       mass_per_lev and total_org_mass were accumulated in-loop above.
+    if (B_returned_step > 0.0d0) then
+      if (total_org_mass > 0.0d0) then
+        do lev = 1, n_lev
+          biomass(lev) = biomass(lev) + &
+                         B_returned_step * mass_per_lev(lev) / total_org_mass
+        end do
+      else
+        ! No organisms alive: distribute evenly (pool persists)
+        do lev = 1, n_lev
+          biomass(lev) = biomass(lev) + B_returned_step / real(n_lev, 8)
+        end do
+      end if
+    end if
 
   end subroutine bio_step
 
@@ -310,15 +326,16 @@ contains
   end subroutine bio_write_state
 
   subroutine bio_cleanup()
-    if (allocated(org_z))      deallocate(org_z)
-    if (allocated(org_mass))   deallocate(org_mass)
-    if (allocated(org_radius)) deallocate(org_radius)
-    if (allocated(org_G))      deallocate(org_G)
-    if (allocated(org_rho))    deallocate(org_rho)
-    if (allocated(org_mrepr))  deallocate(org_mrepr)
-    if (allocated(org_age))    deallocate(org_age)
-    if (allocated(org_alive))  deallocate(org_alive)
-    if (allocated(biomass))    deallocate(biomass)
+    if (allocated(org_z))        deallocate(org_z)
+    if (allocated(org_mass))     deallocate(org_mass)
+    if (allocated(org_radius))   deallocate(org_radius)
+    if (allocated(org_G))        deallocate(org_G)
+    if (allocated(org_rho))      deallocate(org_rho)
+    if (allocated(org_mrepr))    deallocate(org_mrepr)
+    if (allocated(org_age))      deallocate(org_age)
+    if (allocated(org_alive))    deallocate(org_alive)
+    if (allocated(biomass))      deallocate(biomass)
+    if (allocated(mass_per_lev)) deallocate(mass_per_lev)
   end subroutine bio_cleanup
 
 end module bio_model

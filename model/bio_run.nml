@@ -7,12 +7,11 @@
   n_levels        = 106        ! altitude grid points (0 to 105 km)
 
   ! Organism lifecycle
-  n_init_orgs     = 100        ! initial population per member
-  m_init          = 1.9e-11    ! initial organism mass [kg]  (warm start ≈ 0.77*m_eq for v_conv=1)
+  n_init_orgs     = 100        ! initial population per member (Yates Table 1)
+  m_init          = 1.857e-11  ! warm start near neutral buoyancy (cold start 1e-12 kg fails: see bio_params.F90)
   halflife        = 30.0       ! organism half-life [days]
   growth_rate_day = 0.70       ! max fractional growth rate [/day]
-  b_total_kg      = 1.0e-6    ! biomass renewal rate [kg/step total] (b_factor scales this)
-  tau_conv_s      = 7000.0    ! convective cell correlation time [s]  (scale_height/v_conv)
+  b_total_kg      = 1.0e-6    ! total conserved biomass pool [kg]  (B=1 control)
   b_factor        = 1.0        ! biomass scaling (1 = default, 3 = population increase test)
 
   ! Atmospheric dynamics

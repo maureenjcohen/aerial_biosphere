@@ -20,7 +20,8 @@ module bio_params
   real(8), parameter :: Z_AHZ_TOP  = 1.05d5             ! AHZ depth [m]  (105 km)
 
   ! ---- Atmospheric profile parameters ----
-  ! Linear profiles between AHZ boundaries (from Yates Sect. 3.1)
+  ! Linear profiles between AHZ boundaries (Yates 2017 Sect. 3.1 endpoint values;
+  ! derived from Morley 2014 Teff=200K, log_g=5.0 atmosphere via ideal gas law)
   real(8), parameter :: RHO_GAS_BOT = 1.2d0             ! gas density at bottom [kg/m^3]
   real(8), parameter :: RHO_GAS_TOP = 0.4d0             ! gas density at top [kg/m^3]
   real(8), parameter :: NU_BOT      = 1.0d-5            ! kinematic viscosity at bottom [m^2/s]
@@ -45,22 +46,17 @@ module bio_params
   integer, parameter :: N_INIT_DEF  = 100               ! initial organism count
   real(8), parameter :: DT_HRS_DEF  = 6.0d0             ! timestep [hours]
   real(8), parameter :: T_YRS_DEF   = 100.0d0           ! simulation length [Earth years]
-  real(8), parameter :: VCONV_DEF   = 1.0d0             ! convective velocity [m/s]  (100 cm/s)
+  real(8), parameter :: VCONV_DEF   = 1.0d0             ! convective velocity [m/s]
   real(8), parameter :: HL_DEF      = 30.0d0            ! organism half-life [days]
-  ! Warm start: m_init = 0.753 × m_eq is the zero-displacement reproductive orbit.
-  ! At this mass, upward drift (m < m_eq phase) exactly cancels downward drift (m > m_eq),
-  ! so organisms neither drift up nor down on average. Derived analytically for v_conv=1 m/s,
-  ! G=0, rho_org=1000 kg/m³ at midpoint atmosphere conditions.
-  ! (The paper's m_init=1e-12 kg would require a very long evolutionary transient.)
-  real(8), parameter :: MINIT_DEF   = 1.857d-11          ! initial organism mass [kg] (warm start, 0.753×m_eq)
+  ! Warm start near neutral buoyancy.  Yates Table 1 lists m_init = 1e-9 g = 1e-12 kg, but
+  ! constant upward drift (v_net ~ +0.88 m/s) sweeps all organisms out of the AHZ in ~1.4 days
+  ! with at most 1 reproduction before exit — analytically impossible to establish from cold start.
+  ! Near-buoyancy warm start produces the correct steady-state distribution (Yates Fig 3-5).
+  real(8), parameter :: MINIT_DEF   = 1.857d-11          ! initial organism mass [kg]
   real(8), parameter :: BFAC_DEF    = 1.0d0             ! biomass scaling factor
-  real(8), parameter :: B_REF_KG   = 1.0d-6            ! total biomass renewal per step [kg] (per-level = B_REF_KG/n_lev)
+  ! Total conserved biomass pool (Yates Sect. 2.2): organisms consume from it,
+  ! and return their mass on death.  No external renewal.
+  real(8), parameter :: B_REF_KG   = 1.0d-6            ! total biomass pool [kg]
   real(8), parameter :: GRWTH_DEF   = 0.70d0            ! max fractional growth rate [/day]
-
-  ! ---- Convective diffusion ----
-  ! Convection modelled as 1-D random walk: D = v_conv^2 * tau_conv / 2  (Einstein)
-  ! sigma_dz per step = v_conv * sqrt(tau_conv * dt_s).
-  ! tau_conv ~ scale_height / v_conv: H ~ 7 km → tau_conv ~ 7000 s at v_conv=1 m/s.
-  real(8), parameter :: TAU_CONV_DEF = 7000.0d0         ! convective correlation time [s]
 
 end module bio_params
