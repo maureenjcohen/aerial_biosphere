@@ -8,10 +8,11 @@
 
   ! Organism lifecycle
   n_init_orgs     = 100        ! initial population per member
-  m_init          = 1.0e-12    ! initial organism mass [kg]  (= 1e-9 g)
+  m_init          = 1.9e-11    ! initial organism mass [kg]  (warm start ≈ 0.77*m_eq for v_conv=1)
   halflife        = 30.0       ! organism half-life [days]
   growth_rate_day = 0.70       ! max fractional growth rate [/day]
-  b_total_kg      = 1.0e-6    ! atmospheric nutrient pool [kg]  (b_factor scales this)
+  b_total_kg      = 1.0e-6    ! biomass renewal rate [kg/step total] (b_factor scales this)
+  tau_conv_s      = 7000.0    ! convective cell correlation time [s]  (scale_height/v_conv)
   b_factor        = 1.0        ! biomass scaling (1 = default, 3 = population increase test)
 
   ! Atmospheric dynamics

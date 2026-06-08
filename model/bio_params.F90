@@ -47,9 +47,20 @@ module bio_params
   real(8), parameter :: T_YRS_DEF   = 100.0d0           ! simulation length [Earth years]
   real(8), parameter :: VCONV_DEF   = 1.0d0             ! convective velocity [m/s]  (100 cm/s)
   real(8), parameter :: HL_DEF      = 30.0d0            ! organism half-life [days]
-  real(8), parameter :: MINIT_DEF   = 1.0d-12           ! initial organism mass [kg]  (1e-9 g)
+  ! Warm start: m_init = 0.753 × m_eq is the zero-displacement reproductive orbit.
+  ! At this mass, upward drift (m < m_eq phase) exactly cancels downward drift (m > m_eq),
+  ! so organisms neither drift up nor down on average. Derived analytically for v_conv=1 m/s,
+  ! G=0, rho_org=1000 kg/m³ at midpoint atmosphere conditions.
+  ! (The paper's m_init=1e-12 kg would require a very long evolutionary transient.)
+  real(8), parameter :: MINIT_DEF   = 1.857d-11          ! initial organism mass [kg] (warm start, 0.753×m_eq)
   real(8), parameter :: BFAC_DEF    = 1.0d0             ! biomass scaling factor
-  real(8), parameter :: B_REF_KG   = 1.0d-6            ! reference biomass pool [kg]
+  real(8), parameter :: B_REF_KG   = 1.0d-6            ! total biomass renewal per step [kg] (per-level = B_REF_KG/n_lev)
   real(8), parameter :: GRWTH_DEF   = 0.70d0            ! max fractional growth rate [/day]
+
+  ! ---- Convective diffusion ----
+  ! Convection modelled as 1-D random walk: D = v_conv^2 * tau_conv / 2  (Einstein)
+  ! sigma_dz per step = v_conv * sqrt(tau_conv * dt_s).
+  ! tau_conv ~ scale_height / v_conv: H ~ 7 km → tau_conv ~ 7000 s at v_conv=1 m/s.
+  real(8), parameter :: TAU_CONV_DEF = 7000.0d0         ! convective correlation time [s]
 
 end module bio_params

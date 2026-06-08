@@ -41,15 +41,19 @@ module bio_model
 
   integer, save :: n_slots    ! allocated array length
   integer, save :: n_orgs     ! current live count
+  integer, save :: n_free     ! number of vacant slots (n_free = n_slots - n_orgs)
 
   ! ---- Biomass field ----
   real(8), allocatable, save :: biomass(:)     ! [kg] per atmosphere level
 
   ! ---- Run parameters (set in bio_init_run) ----
-  real(8), save :: v_conv_ms     ! convective velocity [m/s]
+  real(8), save :: v_conv_ms     ! convective velocity [m/s]  (sets diffusion scale)
   real(8), save :: halflife_days
   real(8), save :: dt_s          ! timestep [s]
   real(8), save :: growth_rate   ! max fractional growth rate [/day]
+  real(8), save :: D_conv        ! vertical diffusivity [m^2/s]  = v_conv^2 * tau_conv
+  real(8), save :: sigma_dz      ! std dev of convective displacement per step [m]
+  real(8), save :: B_renew_per_lev  ! per-level biomass renewal per step [kg]
 
 contains
 
@@ -105,6 +109,7 @@ contains
   subroutine add_organism(z, mass, G, rho, mrepr)
     real(8), intent(in) :: z, mass, G, rho, mrepr
     integer :: i
+    if (n_free == 0) return   ! population at cap; discard offspring O(1)
     do i = 1, n_slots
       if (.not. org_alive(i)) then
         org_z(i)      = z
@@ -116,6 +121,7 @@ contains
         org_age(i)    = 0.0d0
         org_alive(i)  = .true.
         n_orgs        = n_orgs + 1
+        n_free        = n_free - 1
         return
       end if
     end do
@@ -131,6 +137,7 @@ contains
     biomass(lev)  = biomass(lev) + org_mass(i)
     org_alive(i)  = .false.
     n_orgs        = n_orgs - 1
+    n_free        = n_free + 1
   end subroutine kill_organism
 
   !--------------------------------------------------------------------
@@ -152,10 +159,10 @@ contains
   ! b_factor: multiplier on b_ref_kg (= 1 for control, = 3 for B-sensitivity)
   !--------------------------------------------------------------------
   subroutine bio_init_run(n_init, m_init, v_conv, halflife, dt_hrs, &
-                          b_ref_kg, b_factor, grwth)
+                          b_ref_kg, b_factor, grwth, tau_conv)
     integer, intent(in) :: n_init
     real(8), intent(in) :: m_init, v_conv, halflife, dt_hrs
-    real(8), intent(in) :: b_ref_kg, b_factor, grwth
+    real(8), intent(in) :: b_ref_kg, b_factor, grwth, tau_conv
     integer  :: i
     real(8)  :: u, z0, G0, rho0, B_total
 
@@ -163,6 +170,9 @@ contains
     halflife_days = halflife
     dt_s         = dt_hrs * 3600.0d0
     growth_rate  = grwth
+    D_conv       = 0.5d0 * v_conv**2 * tau_conv     ! Einstein D: <x^2>=2Dt, D=v^2*tau/2
+    sigma_dz     = sqrt(2.0d0 * D_conv * dt_s)     ! = v_conv * sqrt(tau_conv * dt_s)
+    B_renew_per_lev = b_ref_kg * b_factor / real(n_lev, 8)
 
     ! Allocate / reset organism arrays
     n_slots = MAX_ORGS
@@ -174,6 +184,7 @@ contains
              org_age(n_slots), org_alive(n_slots))
     org_alive = .false.
     n_orgs    = 0
+    n_free    = n_slots
 
     ! Biomass: total = b_ref_kg * b_factor, evenly distributed over levels.
     ! b_ref_kg is the atmospheric nutrient reservoir (independent of n_init).
@@ -227,7 +238,9 @@ contains
         org_radius(i) = mass_to_radius(org_mass(i), org_G(i), org_rho(i))
       end if
 
-      ! -- 2. Move (convection + Stokes sedimentation) --
+      ! -- 2. Move: constant upward convection + sedimentation (Yates 2017 Sect. 2.2) --
+      ! Net velocity = v_conv (upward) + v_sed (downward).
+      ! Organisms near neutral buoyancy (v_sed ≈ -v_conv) achieve near-zero net drift.
       v_sed    = sedimentation_vel(org_mass(i), org_radius(i), &
                                    org_rho(i), rho_loc, nu_loc)
       dz       = (v_conv_ms + v_sed) * dt_s
@@ -270,6 +283,13 @@ contains
         n_died = n_died + 1
       end if
 
+    end do
+
+    ! -- 6. Biomass renewal (chemostat: atmosphere continuously resupplies nutrients).
+    !       Each step each level receives B_renew_per_lev kg from photochemistry;
+    !       cap at 2x prevents unbounded accumulation from organism deaths.
+    do lev = 1, n_lev
+      biomass(lev) = min(biomass(lev) + B_renew_per_lev, 2.0d0 * B_renew_per_lev)
     end do
 
   end subroutine bio_step
