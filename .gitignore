@@ -1,3 +1,9 @@
 # Files
 *.pdf
 *.txt
+*.dat
+*.log 
+
+*.o
+*.mod
+bio_1d
