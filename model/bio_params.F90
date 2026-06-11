@@ -48,18 +48,24 @@ module bio_params
   real(8), parameter :: T_YRS_DEF   = 100.0d0           ! simulation length [Earth years]
   real(8), parameter :: VCONV_DEF   = 1.0d0             ! convective velocity [m/s]
   real(8), parameter :: HL_DEF      = 30.0d0            ! organism half-life [days]
-  ! Warm start near neutral buoyancy.  Yates Table 1 lists m_init = 1e-9 g = 1e-12 kg, but
-  ! constant upward drift (v_net ~ +0.88 m/s) sweeps all organisms out of the AHZ in ~1.4 days
-  ! with at most 1 reproduction before exit — analytically impossible to establish from cold start.
-  ! Near-buoyancy warm start produces the correct steady-state distribution (Yates Fig 3-5).
-  real(8), parameter :: MINIT_DEF   = 1.857d-11          ! initial organism mass [kg]
+  ! Cold start: Yates Table 1 control run uses m_init = 1e-9 g = 1e-12 kg.  Establishment
+  ! from this seed requires a finite max growth rate (GRWTH_DEF below); see bio_model.F90.
+  real(8), parameter :: MINIT_DEF   = 1.0d-12          ! initial organism mass [kg]
   real(8), parameter :: BFAC_DEF    = 1.0d0             ! biomass scaling factor
   ! Total conserved biomass pool (Yates Sect. 2.2): organisms consume from it,
   ! and return their mass on death.  No external renewal.
   real(8), parameter :: B_REF_KG   = 1.0d-6            ! total biomass pool [kg]
-  ! Optional max specific growth rate [/day].  Growth is biomass-limited (Yates
-  ! Sect. 2.2); this cap is DISABLED by default (<= 0).  Set > 0 only to impose an
-  ! artificial ceiling (e.g. 0.70 reproduces the old fractional-cap behaviour).
-  real(8), parameter :: GRWTH_DEF   = 0.0d0
+  ! Max specific growth rate (NPZ mu_max; Yates draws from nutrient-phytoplankton models,
+  ! Franks 2002, and reproduces "subject to growth rate").  Growth per step is
+  ! min(mu_max*dt*mass, available-biomass share) -> Monod-like.  Must be > 0:
+  ! mu_max = 0 lets a lone organism eat a whole level in one step and fall out of the AHZ
+  ! before reproducing (cold-start extinction).  ~2-3/day establishes from the 1e-12 seed.
+  real(8), parameter :: GRWTH_DEF   = 2.5d0
+  ! Founder reproduction-mass seeding spread [kg].  Default <= MINIT_DEF means all
+  ! founders start at m_init with m_repr = m_init (literal Yates reading).  If set
+  ! > m_init, founder mass / m_repr is drawn log-uniform over [m_init, MRSEED_DEF];
+  ! used to test whether seeding some founders near the neutral-buoyancy mass
+  ! (m_eq ~ 2.4e-11 kg) lets a floating population establish from a cold start.
+  real(8), parameter :: MRSEED_DEF  = 0.0d0
 
 end module bio_params

@@ -22,9 +22,10 @@
 ! Timestep order (per Yates Sect. 2.2): eat -> move -> AHZ check ->
 !                                        reproduce -> age/die
 !
-! Biomass is conserved: organisms consume from the pool and return their
-! mass to the pool on death.  Returned biomass is redistributed across all
-! AHZ levels in proportion to organism mass per level (Yates Sect. 2.2).
+! Biomass cycles locally: organisms consume from the pool in their level and,
+! when they die of old age (half-life), return their mass to the biomass of the
+! level where they died.  Organisms that leave the AHZ (washout) carry their mass
+! out of the domain — that biomass is LOST from the pool (it is not conserved).
 !
 ! Growth is BIOMASS-LIMITED (Yates Sect. 2.2): an organism's growth is limited
 ! only by the biomass available in its level, not by a fixed maximum rate.  The
@@ -57,15 +58,9 @@ module bio_model
   ! ---- Biomass field ----
   real(8), allocatable, save :: biomass(:)     ! [kg] per atmosphere level
 
-  ! ---- Per-level scratch array for redistribution ----
-  real(8), allocatable, save :: mass_per_lev(:)   ! sum of org_mass in each level [kg]
-
   ! ---- Per-level scratch for biomass-limited growth (frozen at start of step) ----
   real(8), allocatable, save :: mass_lev_start(:) ! organism mass per level, pre-eat [kg]
   real(8), allocatable, save :: biomass_avail(:)  ! biomass per level at step start [kg]
-
-  ! ---- Biomass returned by dead organisms this timestep ----
-  real(8), save :: B_returned_step
 
   ! ---- Run parameters (set in bio_init_run) ----
   real(8), save :: v_conv_ms     ! convective velocity [m/s]
@@ -146,13 +141,13 @@ contains
   end subroutine add_organism
 
   !--------------------------------------------------------------------
-  ! Kill organism at index i; accumulate its mass for redistribution.
-  ! Biomass is NOT returned locally; it goes into B_returned_step and
-  ! is redistributed globally at the end of bio_step (Yates Sect. 2.2).
+  ! Kill organism at index i (remove it from the population).
+  ! Biomass return is handled by the caller: a half-life death deposits the
+  ! organism's mass into its level's biomass; a washout death (left the AHZ)
+  ! returns nothing — that biomass is lost from the pool.
   !--------------------------------------------------------------------
   subroutine kill_organism(i)
     integer, intent(in) :: i
-    B_returned_step = B_returned_step + org_mass(i)
     org_alive(i)  = .false.
     n_orgs        = n_orgs - 1
     n_free        = n_free + 1
@@ -172,18 +167,17 @@ contains
   ! Initialise one ensemble member
   !--------------------------------------------------------------------
   subroutine bio_init_run(n_init, m_init, v_conv, halflife, dt_hrs, &
-                          b_ref_kg, b_factor, grwth)
+                          b_ref_kg, b_factor, grwth, mrepr_seed_max)
     integer, intent(in) :: n_init
     real(8), intent(in) :: m_init, v_conv, halflife, dt_hrs
-    real(8), intent(in) :: b_ref_kg, b_factor, grwth
+    real(8), intent(in) :: b_ref_kg, b_factor, grwth, mrepr_seed_max
     integer  :: i
-    real(8)  :: u, z0, G0, rho0, B_total
+    real(8)  :: u, z0, G0, rho0, B_total, m0
 
     v_conv_ms    = v_conv
     halflife_days = halflife
     dt_s         = dt_hrs * 3600.0d0
     growth_rate  = grwth
-    B_returned_step = 0.0d0
 
     ! Allocate / reset organism arrays
     n_slots = MAX_ORGS
@@ -197,25 +191,35 @@ contains
     n_orgs    = 0
     n_free    = n_slots
 
-    ! Biomass pool: conserved total = b_ref_kg * b_factor, spread evenly.
+    ! Biomass pool: initial total = b_ref_kg * b_factor, spread evenly.  The pool
+    ! is no longer globally conserved — washout deaths remove biomass (see bio_step).
     if (allocated(biomass))        deallocate(biomass)
-    if (allocated(mass_per_lev))   deallocate(mass_per_lev)
     if (allocated(mass_lev_start)) deallocate(mass_lev_start)
     if (allocated(biomass_avail))  deallocate(biomass_avail)
-    allocate(biomass(n_lev), mass_per_lev(n_lev), &
-             mass_lev_start(n_lev), biomass_avail(n_lev))
+    allocate(biomass(n_lev), mass_lev_start(n_lev), biomass_avail(n_lev))
     B_total  = b_ref_kg * b_factor
     biomass  = B_total / real(n_lev, 8)
-    mass_per_lev   = 0.0d0
     mass_lev_start = 0.0d0
     biomass_avail  = 0.0d0
 
-    ! Seed initial organisms with random properties throughout the AHZ
+    ! Seed initial organisms with random properties throughout the AHZ.
+    ! Founder mass / reproduction mass: by default all founders start at m_init
+    ! (mrepr_seed_max <= m_init).  If mrepr_seed_max > m_init, the founder mass is
+    ! drawn log-uniformly over [m_init, mrepr_seed_max] and m_repr is set to that
+    ! mass (Yates: "reproduction mass is close to the birth mass").  This tests
+    ! whether seeding some founders near the neutral-buoyancy mass lets a floating
+    ! sub-population establish from a cold start.
     do i = 1, n_init
       call random_number(u);  z0   = u * Z_AHZ_TOP
       call random_number(u);  G0   = G_MIN + u * (G_MAX - G_MIN)
       call random_number(u);  rho0 = RHO_ORG_MIN + u * (RHO_ORG_MAX - RHO_ORG_MIN)
-      call add_organism(z0, m_init, G0, rho0, m_init)
+      if (mrepr_seed_max > m_init) then
+        call random_number(u)
+        m0 = m_init * (mrepr_seed_max / m_init)**u   ! log-uniform in [m_init, mrepr_seed_max]
+      else
+        m0 = m_init
+      end if
+      call add_organism(z0, m0, G0, rho0, m0)
     end do
   end subroutine bio_init_run
 
@@ -230,14 +234,9 @@ contains
     real(8)  :: v_sed, dz, dB
     real(8)  :: G_c, rho_c, mrepr_c
     real(8)  :: u, p_death, noise
-    real(8)  :: total_org_mass
 
     n_born  = 0
     n_died  = 0
-    B_returned_step = 0.0d0
-    ! Accumulate mass_per_lev and total_org_mass in-loop to avoid a second O(n_slots) pass.
-    mass_per_lev   = 0.0d0
-    total_org_mass = 0.0d0
 
     ! Per-timestep death probability from exponential decay with half-life
     p_death = 1.0d0 - 2.0d0**(-dt_s / (halflife_days * SEC_PER_DAY))
@@ -325,36 +324,20 @@ contains
       end if
 
       ! -- 5. Age and stochastic death --
+      !    A half-life death deposits the organism's mass into the biomass of the
+      !    level where it died (local return).  Biomass of organisms that left the
+      !    AHZ (washout, step 3) is lost — handled by skipping the deposit there.
       org_age(i) = org_age(i) + dt_s / SEC_PER_DAY
       call random_number(u)
       if (u < p_death) then
+        lev = atm_level(org_z(i))
+        biomass(lev) = biomass(lev) + org_mass(i)
         call kill_organism(i)
         n_died = n_died + 1
         cycle
       end if
 
-      ! Organism survived this step: accumulate for redistribution weighting.
-      lev = atm_level(org_z(i))
-      mass_per_lev(lev) = mass_per_lev(lev) + org_mass(i)
-      total_org_mass    = total_org_mass    + org_mass(i)
-
     end do
-
-    ! -- 6. Redistribute returned biomass (Yates Sect. 2.2).
-    !       mass_per_lev and total_org_mass were accumulated in-loop above.
-    if (B_returned_step > 0.0d0) then
-      if (total_org_mass > 0.0d0) then
-        do lev = 1, n_lev
-          biomass(lev) = biomass(lev) + &
-                         B_returned_step * mass_per_lev(lev) / total_org_mass
-        end do
-      else
-        ! No organisms alive: distribute evenly (pool persists)
-        do lev = 1, n_lev
-          biomass(lev) = biomass(lev) + B_returned_step / real(n_lev, 8)
-        end do
-      end if
-    end if
 
   end subroutine bio_step
 
@@ -383,7 +366,6 @@ contains
     if (allocated(org_age))      deallocate(org_age)
     if (allocated(org_alive))    deallocate(org_alive)
     if (allocated(biomass))        deallocate(biomass)
-    if (allocated(mass_per_lev))   deallocate(mass_per_lev)
     if (allocated(mass_lev_start)) deallocate(mass_lev_start)
     if (allocated(biomass_avail))  deallocate(biomass_avail)
   end subroutine bio_cleanup

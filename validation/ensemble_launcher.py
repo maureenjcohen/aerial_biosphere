@@ -41,20 +41,28 @@ from pathlib import Path
 # Path to compiled model binary, relative to this script
 EXE_REL = "../model/bio_1d"
 
-# Root output directory, relative to this script
-OUTDIR_REL = "../ensemble_output"
+# Control namelist, relative to this script.  Run values are read from here;
+# DEFAULT_PARAMS below are only fallbacks for keys absent from the namelist.
+NML_REL = "../model/bio_run.nml"
 
-# Default ensemble settings
+# Root output directory, relative to this script (override with --outdir)
+OUTDIR_REL = "../ensemble_output"
+_OUTDIR_OVERRIDE = None   # absolute path set from --outdir; see outdir_root()
+
+# Default ensemble settings (used only if absent from the namelist)
 DEFAULT_N_MEMBERS   = 20
 DEFAULT_SEED_BASE   = 42      # seed for member k = SEED_BASE + (k-1)*1000
 
-# Default namelist parameters (Yates 2017 Table 1 control run)
+# Fallback namelist parameters (Yates 2017 Table 1 control run).  Any key also
+# present in bio_run.nml is overridden by the namelist value; CLI flags override
+# both.
 DEFAULT_PARAMS = dict(
     n_levels        = 106,
     n_init_orgs     = 100,
-    m_init          = 1e-12,    # warm start near neutral buoyancy [kg]
+    m_init          = 1.0e-12,      # cold start (Yates Table 1 control: 1e-9 g) [kg]
     halflife        = 30.0,         # organism half-life [days]
-    growth_rate_day = 0.0,          # optional max growth-rate cap [/day]; 0 = biomass-limited (Yates)
+    growth_rate_day = 2.5,          # max specific growth rate (NPZ mu_max) [/day]
+    mrepr_seed_max  = 0.0,          # founder m_repr spread [kg]; <=m_init = no spread
     b_total_kg      = 1.0e-6,       # conserved biomass pool [kg]  (B=1 control)
     b_factor        = 1.0,
     v_conv          = 1.0,          # convective velocity [m/s]
@@ -62,11 +70,62 @@ DEFAULT_PARAMS = dict(
     t_sim_years     = 100.0,
 )
 
+# Keys read from the namelist as ensemble-level controls (not per-member params)
+ENSEMBLE_KEYS = {"n_ensemble", "seed_base", "outdir"}
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
 HERE = Path(__file__).resolve().parent
+
+
+def _coerce(val: str):
+    """Convert a namelist scalar string to int / float / bool / str."""
+    if (val.startswith("'") and val.endswith("'")) or \
+       (val.startswith('"') and val.endswith('"')):
+        return val[1:-1]
+    low = val.lower()
+    if low in (".true.", "t", ".t."):
+        return True
+    if low in (".false.", "f", ".f."):
+        return False
+    try:
+        return int(val)
+    except ValueError:
+        pass
+    try:
+        # Fortran allows 'd'/'D' exponent markers (e.g. 1.0d-6)
+        return float(val.replace("d", "e").replace("D", "e"))
+    except ValueError:
+        return val
+
+
+def parse_namelist(path: Path) -> dict:
+    """Parse a simple Fortran namelist (&group ... /) into a typed dict.
+
+    Reads ``key = value`` lines from the first namelist group, stripping ``!``
+    comments and inferring types.  Only scalar values are handled, which is all
+    bio_run.nml contains.  Returns {} if the file is missing.
+    """
+    params: dict = {}
+    if not path.is_file():
+        return params
+    in_group = False
+    for raw in path.read_text().splitlines():
+        line = raw.split("!", 1)[0].strip()      # drop trailing comment
+        if not line:
+            continue
+        if line.startswith("&"):
+            in_group = True
+            continue
+        if line.startswith("/"):
+            break                                 # end of group
+        if not in_group or "=" not in line:
+            continue
+        key, val = line.split("=", 1)
+        params[key.strip().lower()] = _coerce(val.strip().rstrip(",").strip())
+    return params
 
 
 def resolve_exe():
@@ -84,6 +143,8 @@ def resolve_exe():
 
 
 def outdir_root():
+    if _OUTDIR_OVERRIDE is not None:
+        return Path(_OUTDIR_OVERRIDE).resolve()
     return (HERE / OUTDIR_REL).resolve()
 
 
@@ -117,6 +178,7 @@ def write_namelist(k: int, params: dict, seed_base: int) -> Path:
           m_init          = {p['m_init']:.3e}
           halflife        = {p['halflife']}
           growth_rate_day = {p['growth_rate_day']}
+          mrepr_seed_max  = {p['mrepr_seed_max']:.3e}
           b_total_kg      = {p['b_total_kg']:.3e}
           b_factor        = {p['b_factor']}
           v_conv          = {p['v_conv']}
@@ -148,41 +210,75 @@ def run_member(k: int):
 # ---------------------------------------------------------------------------
 
 def main():
+    global _OUTDIR_OVERRIDE
+
     parser = argparse.ArgumentParser(
         description="Run the Yates IBM ensemble in parallel",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )
+    # Precedence for every run value: DEFAULT_PARAMS < bio_run.nml < CLI flag.
+    # Param-overriding flags default to None so we can tell when they were given.
+    parser.add_argument("--nml", default=NML_REL,
+                        help=f"Control namelist to read (default: {NML_REL}).")
     parser.add_argument("--member", type=int, metavar="N",
                         help="Run only member N (1-indexed); skip the rest.")
-    parser.add_argument("--jobs", type=int, default=DEFAULT_N_MEMBERS,
-                        help=f"Max simultaneous members (default: {DEFAULT_N_MEMBERS}).")
-    parser.add_argument("--n_members", type=int, default=DEFAULT_N_MEMBERS)
-    parser.add_argument("--t_sim_years", type=float, default=DEFAULT_PARAMS["t_sim_years"])
-    parser.add_argument("--b_factor",    type=float, default=DEFAULT_PARAMS["b_factor"])
-    parser.add_argument("--v_conv",      type=float, default=DEFAULT_PARAMS["v_conv"])
-    parser.add_argument("--seed_base",   type=int,   default=DEFAULT_SEED_BASE)
+    parser.add_argument("--jobs", type=int, default=None,
+                        help="Max simultaneous members (default: all of them).")
+    parser.add_argument("--n_members",   type=int,   default=None)
+    parser.add_argument("--t_sim_years", type=float, default=None)
+    parser.add_argument("--b_factor",    type=float, default=None)
+    parser.add_argument("--v_conv",      type=float, default=None)
+    parser.add_argument("--growth_rate_day", type=float, default=None,
+                        help="Max specific growth rate (NPZ mu_max) [/day].")
+    parser.add_argument("--m_init",      type=float, default=None,
+                        help="Initial organism mass [kg].")
+    parser.add_argument("--mrepr_seed_max", type=float, default=None,
+                        help="Founder m_repr log-uniform spread up to this mass [kg]; "
+                             "<= m_init disables (all founders at m_init).")
+    parser.add_argument("--seed_base",   type=int,   default=None)
+    parser.add_argument("--outdir",      default=None,
+                        help="Output root (default: ../ensemble_output).")
     args = parser.parse_args()
 
-    params = dict(DEFAULT_PARAMS)
-    params["t_sim_years"] = args.t_sim_years
-    params["b_factor"]    = args.b_factor
-    params["v_conv"]      = args.v_conv
+    # 1. fallbacks, 2. namelist, 3. CLI
+    nml_path = Path(args.nml)
+    if not nml_path.is_absolute():
+        nml_path = (HERE / nml_path).resolve()
+    nml = parse_namelist(nml_path)
 
-    n = args.n_members
-    members = [args.member] if args.member else list(range(1, n + 1))
+    params = dict(DEFAULT_PARAMS)
+    for key in params:
+        if key in nml:
+            params[key] = nml[key]
+    for key in ("t_sim_years", "b_factor", "v_conv", "growth_rate_day",
+                "m_init", "mrepr_seed_max"):
+        if getattr(args, key) is not None:
+            params[key] = getattr(args, key)
+
+    n_members = args.n_members if args.n_members is not None \
+        else nml.get("n_ensemble", DEFAULT_N_MEMBERS)
+    seed_base = args.seed_base if args.seed_base is not None \
+        else nml.get("seed_base", DEFAULT_SEED_BASE)
+    if args.outdir is not None:
+        _OUTDIR_OVERRIDE = args.outdir
+
+    members = [args.member] if args.member else list(range(1, n_members + 1))
+    jobs = args.jobs if args.jobs is not None else len(members)
 
     # Write all namelists up front so workers don't race on directory creation
     for k in members:
-        write_namelist(k, params, args.seed_base)
+        write_namelist(k, params, seed_base)
 
+    print(f"Namelist read    : {nml_path}{'' if nml else '  (missing — using defaults)'}")
     print(f"Output directory : {outdir_root()}")
+    print(f"m_init / growth  : {params['m_init']:.3e} kg  /  {params['growth_rate_day']} /day")
     print(f"Members to run   : {members[0]}–{members[-1]}  ({len(members)} total)")
-    print(f"Parallel jobs    : {min(args.jobs, len(members))}")
+    print(f"Parallel jobs    : {min(jobs, len(members))}")
     print()
 
     results = {}
-    with ProcessPoolExecutor(max_workers=min(args.jobs, len(members))) as pool:
+    with ProcessPoolExecutor(max_workers=min(jobs, len(members))) as pool:
         futures = {pool.submit(run_member, k): k for k in members}
         for fut in as_completed(futures):
             k, rc = fut.result()

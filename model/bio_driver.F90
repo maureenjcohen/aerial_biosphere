@@ -26,13 +26,13 @@ program bio_driver
   integer            :: n_ensemble, n_init_orgs, seed_base, n_levels
   real(8)            :: v_conv, halflife, dt_hrs, t_sim_years
   real(8)            :: m_init, b_factor, b_total_kg, growth_rate_day
-  real(8)            :: tau_conv_s
+  real(8)            :: tau_conv_s, mrepr_seed_max
   character(len=256) :: outdir
 
   namelist /bio_run/ n_ensemble, n_init_orgs, seed_base, n_levels,   &
                      v_conv, halflife, dt_hrs, t_sim_years,           &
                      m_init, b_factor, b_total_kg, growth_rate_day,   &
-                     tau_conv_s, outdir
+                     tau_conv_s, mrepr_seed_max, outdir
 
   ! ---- Local variables ----
   integer  :: iens, istep, n_steps, n_steps_per_day, n_steps_last_yr
@@ -56,6 +56,7 @@ program bio_driver
   b_total_kg      = B_REF_KG
   growth_rate_day = GRWTH_DEF
   tau_conv_s      = 7000.0d0
+  mrepr_seed_max  = MRSEED_DEF
   outdir          = 'output'
 
   ! ---- Read namelist if provided ----
@@ -85,9 +86,14 @@ program bio_driver
   write(*,'(a,f8.2,a)') ' v_conv           : ', v_conv,          ' m/s'
   write(*,'(a,f8.2,a)') ' Half-life        : ', halflife,        ' days'
   if (growth_rate_day > 0.0d0) then
-    write(*,'(a,f8.2,a)') ' growth cap        : ', growth_rate_day, ' /day (optional)'
+    write(*,'(a,f8.2,a)') ' growth cap        : ', growth_rate_day, ' /day (mu_max)'
   else
-    write(*,'(a)')        ' growth            :  biomass-limited (Yates, no rate cap)'
+    write(*,'(a)')        ' growth            :  biomass-limited (no rate cap)'
+  end if
+  if (mrepr_seed_max > m_init) then
+    write(*,'(a,1pe10.3,a)') ' founder m_repr max: ', mrepr_seed_max, ' kg (log-uniform seed)'
+  else
+    write(*,'(a)')        ' founder m_repr    :  = m_init (no spread)'
   end if
   write(*,'(a,1pe10.3,a)') ' biomass pool    : ', b_total_kg*b_factor, ' kg (conserved)'
   write(*,'(a,f8.2,a)') ' Timestep         : ', dt_hrs,          ' hours'
@@ -113,7 +119,7 @@ program bio_driver
     call random_seed(put=seed)
 
     call bio_init_run(n_init_orgs, m_init, v_conv, halflife, &
-                      dt_hrs, b_total_kg, b_factor, growth_rate_day)
+                      dt_hrs, b_total_kg, b_factor, growth_rate_day, mrepr_seed_max)
 
     ! Open output files for this member
     write(fname,'(a,"/ensemble_",i3.3,"_state.dat")') trim(outdir), iens
