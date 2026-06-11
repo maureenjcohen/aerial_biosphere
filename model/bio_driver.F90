@@ -84,7 +84,11 @@ program bio_driver
   write(*,'(a,1pe10.3,a)') ' m_init          : ', m_init,         ' kg'
   write(*,'(a,f8.2,a)') ' v_conv           : ', v_conv,          ' m/s'
   write(*,'(a,f8.2,a)') ' Half-life        : ', halflife,        ' days'
-  write(*,'(a,f8.2,a)') ' growth_rate_day  : ', growth_rate_day, ' /day'
+  if (growth_rate_day > 0.0d0) then
+    write(*,'(a,f8.2,a)') ' growth cap        : ', growth_rate_day, ' /day (optional)'
+  else
+    write(*,'(a)')        ' growth            :  biomass-limited (Yates, no rate cap)'
+  end if
   write(*,'(a,1pe10.3,a)') ' biomass pool    : ', b_total_kg*b_factor, ' kg (conserved)'
   write(*,'(a,f8.2,a)') ' Timestep         : ', dt_hrs,          ' hours'
   write(*,'(a,f8.1,a)') ' Sim length       : ', t_sim_years,     ' years'

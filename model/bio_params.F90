@@ -57,6 +57,9 @@ module bio_params
   ! Total conserved biomass pool (Yates Sect. 2.2): organisms consume from it,
   ! and return their mass on death.  No external renewal.
   real(8), parameter :: B_REF_KG   = 1.0d-6            ! total biomass pool [kg]
-  real(8), parameter :: GRWTH_DEF   = 0.70d0            ! max fractional growth rate [/day]
+  ! Optional max specific growth rate [/day].  Growth is biomass-limited (Yates
+  ! Sect. 2.2); this cap is DISABLED by default (<= 0).  Set > 0 only to impose an
+  ! artificial ceiling (e.g. 0.70 reproduces the old fractional-cap behaviour).
+  real(8), parameter :: GRWTH_DEF   = 0.0d0
 
 end module bio_params

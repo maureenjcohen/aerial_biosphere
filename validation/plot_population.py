@@ -25,8 +25,13 @@ import matplotlib.pyplot as plt
 def load_pop_series(outdir, n_ens):
     series = []
     for iens in range(1, n_ens + 1):
-        fname = os.path.join(outdir, f"ensemble_{iens:03d}_pop.dat")
-        if not os.path.isfile(fname):
+        fname_member = os.path.join(outdir, f"member_{iens:02d}", "ensemble_001_pop.dat")
+        fname_flat   = os.path.join(outdir, f"ensemble_{iens:03d}_pop.dat")
+        if os.path.isfile(fname_member):
+            fname = fname_member
+        elif os.path.isfile(fname_flat):
+            fname = fname_flat
+        else:
             continue
         data = np.loadtxt(fname, comments="#")
         if data.ndim == 1 or data.shape[0] == 0:

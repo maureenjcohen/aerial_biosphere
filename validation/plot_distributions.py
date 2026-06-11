@@ -35,13 +35,24 @@ COL_SKIN     = 6
 
 
 def load_ensemble(outdir, n_ens):
-    """Load all state files; return concatenated arrays."""
+    """Load all state files; return concatenated arrays.
+
+    Supports two layouts:
+      1. Flat: outdir/ensemble_NNN_state.dat  (legacy single-run output)
+      2. Per-member: outdir/member_NN/ensemble_001_state.dat  (ensemble launcher output)
+    """
     all_z, all_mass, all_radius, all_G, all_rho = [], [], [], [], []
     loaded = 0
     for iens in range(1, n_ens + 1):
-        fname = os.path.join(outdir, f"ensemble_{iens:03d}_state.dat")
-        if not os.path.isfile(fname):
-            print(f"  [skip] {fname} not found")
+        # Try per-member directory layout first (ensemble_launcher.py output)
+        fname_member = os.path.join(outdir, f"member_{iens:02d}", "ensemble_001_state.dat")
+        fname_flat   = os.path.join(outdir, f"ensemble_{iens:03d}_state.dat")
+        if os.path.isfile(fname_member):
+            fname = fname_member
+        elif os.path.isfile(fname_flat):
+            fname = fname_flat
+        else:
+            print(f"  [skip] member {iens:02d} not found")
             continue
         data = np.loadtxt(fname, comments="#")
         if data.ndim == 1:

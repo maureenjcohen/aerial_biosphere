@@ -26,6 +26,13 @@
 ! mass to the pool on death.  Returned biomass is redistributed across all
 ! AHZ levels in proportion to organism mass per level (Yates Sect. 2.2).
 !
+! Growth is BIOMASS-LIMITED (Yates Sect. 2.2): an organism's growth is limited
+! only by the biomass available in its level, not by a fixed maximum rate.  The
+! biomass in each level is shared among the organisms there in proportion to
+! their mass (bigger organisms eat more).  An optional maximum specific growth
+! rate (growth_rate, [/day]) can be re-enabled by setting it > 0; Yates uses no
+! such cap, so the default is 0 (disabled).
+!
 ! Units: SI throughout (m, kg, s, K)
 !======================================================================
 module bio_model
@@ -52,6 +59,10 @@ module bio_model
 
   ! ---- Per-level scratch array for redistribution ----
   real(8), allocatable, save :: mass_per_lev(:)   ! sum of org_mass in each level [kg]
+
+  ! ---- Per-level scratch for biomass-limited growth (frozen at start of step) ----
+  real(8), allocatable, save :: mass_lev_start(:) ! organism mass per level, pre-eat [kg]
+  real(8), allocatable, save :: biomass_avail(:)  ! biomass per level at step start [kg]
 
   ! ---- Biomass returned by dead organisms this timestep ----
   real(8), save :: B_returned_step
@@ -187,12 +198,17 @@ contains
     n_free    = n_slots
 
     ! Biomass pool: conserved total = b_ref_kg * b_factor, spread evenly.
-    if (allocated(biomass))      deallocate(biomass)
-    if (allocated(mass_per_lev)) deallocate(mass_per_lev)
-    allocate(biomass(n_lev), mass_per_lev(n_lev))
+    if (allocated(biomass))        deallocate(biomass)
+    if (allocated(mass_per_lev))   deallocate(mass_per_lev)
+    if (allocated(mass_lev_start)) deallocate(mass_lev_start)
+    if (allocated(biomass_avail))  deallocate(biomass_avail)
+    allocate(biomass(n_lev), mass_per_lev(n_lev), &
+             mass_lev_start(n_lev), biomass_avail(n_lev))
     B_total  = b_ref_kg * b_factor
     biomass  = B_total / real(n_lev, 8)
-    mass_per_lev = 0.0d0
+    mass_per_lev   = 0.0d0
+    mass_lev_start = 0.0d0
+    biomass_avail  = 0.0d0
 
     ! Seed initial organisms with random properties throughout the AHZ
     do i = 1, n_init
@@ -209,7 +225,7 @@ contains
   !--------------------------------------------------------------------
   subroutine bio_step(n_born, n_died)
     integer, intent(out) :: n_born, n_died
-    integer  :: i, nc, ic, lev
+    integer  :: i, nc, ic, nc_made, lev
     real(8)  :: rho_loc, nu_loc
     real(8)  :: v_sed, dz, dB
     real(8)  :: G_c, rho_c, mrepr_c
@@ -226,6 +242,19 @@ contains
     ! Per-timestep death probability from exponential decay with half-life
     p_death = 1.0d0 - 2.0d0**(-dt_s / (halflife_days * SEC_PER_DAY))
 
+    ! Pre-pass: freeze each level's organism mass and biomass for biomass-limited
+    ! growth.  Growth shares a level's biomass among its organisms by mass, so we
+    ! need the level totals as they stand at the start of the step (before any
+    ! eating, moving, births, or deaths).  Using frozen values makes each
+    ! organism's share independent of processing order.
+    mass_lev_start = 0.0d0
+    do i = 1, n_slots
+      if (.not. org_alive(i)) cycle
+      lev = atm_level(org_z(i))
+      mass_lev_start(lev) = mass_lev_start(lev) + org_mass(i)
+    end do
+    biomass_avail = biomass
+
     do i = 1, n_slots
       if (.not. org_alive(i)) cycle
 
@@ -233,13 +262,23 @@ contains
       lev = atm_level(org_z(i))
       call atm_rhovisc(org_z(i), rho_loc, nu_loc)
 
-      ! -- 1. Eat (growth from biomass pool) --
-      if (biomass(lev) > 0.0d0) then
-        dB = min(growth_rate * (dt_s / SEC_PER_DAY) * org_mass(i), &
-                 0.5d0 * biomass(lev))
-        org_mass(i)   = org_mass(i) + dB
-        biomass(lev)  = biomass(lev) - dB
-        org_radius(i) = mass_to_radius(org_mass(i), org_G(i), org_rho(i))
+      ! -- 1. Eat: biomass-limited growth (Yates 2017 Sect. 2.2) --
+      !    Growth is limited only by available biomass, not by a fixed rate.
+      !    The organism consumes a share of its level's biomass in proportion to
+      !    its mass.  The live min(., biomass(lev)) guard keeps biomass >= 0 and
+      !    stops organisms born this step (not in mass_lev_start) from consuming
+      !    biomass their parent already took.  An optional max specific growth
+      !    rate is applied only if growth_rate > 0 (Yates uses none).
+      if (mass_lev_start(lev) > 0.0d0 .and. biomass_avail(lev) > 0.0d0) then
+        dB = biomass_avail(lev) * org_mass(i) / mass_lev_start(lev)
+        if (growth_rate > 0.0d0) &
+          dB = min(dB, growth_rate * (dt_s / SEC_PER_DAY) * org_mass(i))
+        dB = min(dB, biomass(lev))
+        if (dB > 0.0d0) then
+          org_mass(i)   = org_mass(i) + dB
+          biomass(lev)  = biomass(lev) - dB
+          org_radius(i) = mass_to_radius(org_mass(i), org_G(i), org_rho(i))
+        end if
       end if
 
       ! -- 2. Move: constant upward convection + sedimentation (Yates 2017 Sect. 2.2) --
@@ -256,9 +295,15 @@ contains
       end if
 
       ! -- 4. Reproduce --
+      !    Progeny are born at the parent's reproduction mass with mutated traits.
+      !    Stop if the population is at the cap (n_free == 0) and debit the parent
+      !    only for progeny actually created, so biomass stays conserved even when
+      !    offspring are discarded at the cap.
       nc = int(org_mass(i) / org_mrepr(i)) - 1
       if (nc >= 1) then
+        nc_made = 0
         do ic = 1, nc
+          if (n_free == 0) exit
           G_c     = org_G(i)
           rho_c   = org_rho(i)
           mrepr_c = org_mrepr(i)
@@ -269,11 +314,14 @@ contains
           call normal_rand(noise)
           mrepr_c = mrepr_c * exp(SIG_MREPR * noise)
           call add_organism(org_z(i), org_mrepr(i), G_c, rho_c, mrepr_c)
-          n_born = n_born + 1
+          nc_made = nc_made + 1
+          n_born  = n_born + 1
         end do
-        ! Parent retains remainder mass after reproduction
-        org_mass(i)   = org_mass(i) - real(nc, 8) * org_mrepr(i)
-        org_radius(i) = mass_to_radius(org_mass(i), org_G(i), org_rho(i))
+        if (nc_made > 0) then
+          ! Parent retains remainder mass after reproduction
+          org_mass(i)   = org_mass(i) - real(nc_made, 8) * org_mrepr(i)
+          org_radius(i) = mass_to_radius(org_mass(i), org_G(i), org_rho(i))
+        end if
       end if
 
       ! -- 5. Age and stochastic death --
@@ -334,8 +382,10 @@ contains
     if (allocated(org_mrepr))    deallocate(org_mrepr)
     if (allocated(org_age))      deallocate(org_age)
     if (allocated(org_alive))    deallocate(org_alive)
-    if (allocated(biomass))      deallocate(biomass)
-    if (allocated(mass_per_lev)) deallocate(mass_per_lev)
+    if (allocated(biomass))        deallocate(biomass)
+    if (allocated(mass_per_lev))   deallocate(mass_per_lev)
+    if (allocated(mass_lev_start)) deallocate(mass_lev_start)
+    if (allocated(biomass_avail))  deallocate(biomass_avail)
   end subroutine bio_cleanup
 
 end module bio_model

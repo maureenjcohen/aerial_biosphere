@@ -3,7 +3,7 @@
 *.txt
 *.dat
 *.log 
-
+*.png
 *.o
 *.mod
 bio_1d

@@ -54,7 +54,7 @@ DEFAULT_PARAMS = dict(
     n_init_orgs     = 100,
     m_init          = 1.857e-11,    # warm start near neutral buoyancy [kg]
     halflife        = 30.0,         # organism half-life [days]
-    growth_rate_day = 0.70,         # max fractional growth rate [/day]
+    growth_rate_day = 0.0,          # optional max growth-rate cap [/day]; 0 = biomass-limited (Yates)
     b_total_kg      = 1.0e-6,       # conserved biomass pool [kg]  (B=1 control)
     b_factor        = 1.0,
     v_conv          = 1.0,          # convective velocity [m/s]
