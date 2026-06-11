@@ -8,7 +8,7 @@
 
   ! Organism lifecycle
   n_init_orgs     = 100        ! initial population per member (Yates Table 1)
-  m_init          = 1.857e-11  ! warm start near neutral buoyancy (cold start 1e-12 kg fails: see bio_params.F90)
+  m_init          = 1e-12  ! warm start near neutral buoyancy (cold start 1e-12 kg fails: see bio_params.F90)
   halflife        = 30.0       ! organism half-life [days]
   growth_rate_day = 0.0        ! optional max growth-rate cap [/day]; 0 = biomass-limited (Yates)
   b_total_kg      = 1.0e-6    ! total conserved biomass pool [kg]  (B=1 control)
