@@ -63,7 +63,8 @@ DEFAULT_PARAMS = dict(
     halflife        = 30.0,         # organism half-life [days]
     growth_rate_day = 2.5,          # max specific growth rate (NPZ mu_max) [/day]
     mrepr_seed_max  = 0.0,          # founder m_repr spread [kg]; <=m_init = no spread
-    b_total_kg      = 1.0e-6,       # conserved biomass pool [kg]  (B=1 control)
+    biomass_flux    = 0.0,          # tunable food flux into the bottom level [kg/day]
+    b_total_kg      = 1.0e-6,       # initial biomass pool [kg]  (B=1 control)
     b_factor        = 1.0,
     v_conv          = 1.0,          # convective velocity [m/s]
     dt_hrs          = 6.0,
@@ -179,6 +180,7 @@ def write_namelist(k: int, params: dict, seed_base: int) -> Path:
           halflife        = {p['halflife']}
           growth_rate_day = {p['growth_rate_day']}
           mrepr_seed_max  = {p['mrepr_seed_max']:.3e}
+          biomass_flux    = {p['biomass_flux']:.3e}
           b_total_kg      = {p['b_total_kg']:.3e}
           b_factor        = {p['b_factor']}
           v_conv          = {p['v_conv']}
@@ -236,6 +238,8 @@ def main():
     parser.add_argument("--mrepr_seed_max", type=float, default=None,
                         help="Founder m_repr log-uniform spread up to this mass [kg]; "
                              "<= m_init disables (all founders at m_init).")
+    parser.add_argument("--biomass_flux", type=float, default=None,
+                        help="Tunable food flux into the bottom level [kg/day].")
     parser.add_argument("--seed_base",   type=int,   default=None)
     parser.add_argument("--outdir",      default=None,
                         help="Output root (default: ../ensemble_output).")
@@ -252,7 +256,7 @@ def main():
         if key in nml:
             params[key] = nml[key]
     for key in ("t_sim_years", "b_factor", "v_conv", "growth_rate_day",
-                "m_init", "mrepr_seed_max"):
+                "m_init", "mrepr_seed_max", "biomass_flux"):
         if getattr(args, key) is not None:
             params[key] = getattr(args, key)
 

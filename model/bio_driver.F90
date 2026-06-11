@@ -26,13 +26,13 @@ program bio_driver
   integer            :: n_ensemble, n_init_orgs, seed_base, n_levels
   real(8)            :: v_conv, halflife, dt_hrs, t_sim_years
   real(8)            :: m_init, b_factor, b_total_kg, growth_rate_day
-  real(8)            :: tau_conv_s, mrepr_seed_max
+  real(8)            :: tau_conv_s, mrepr_seed_max, biomass_flux
   character(len=256) :: outdir
 
   namelist /bio_run/ n_ensemble, n_init_orgs, seed_base, n_levels,   &
                      v_conv, halflife, dt_hrs, t_sim_years,           &
                      m_init, b_factor, b_total_kg, growth_rate_day,   &
-                     tau_conv_s, mrepr_seed_max, outdir
+                     tau_conv_s, mrepr_seed_max, biomass_flux, outdir
 
   ! ---- Local variables ----
   integer  :: iens, istep, n_steps, n_steps_per_day, n_steps_last_yr
@@ -57,6 +57,7 @@ program bio_driver
   growth_rate_day = GRWTH_DEF
   tau_conv_s      = 7000.0d0
   mrepr_seed_max  = MRSEED_DEF
+  biomass_flux    = BFLUX_DEF
   outdir          = 'output'
 
   ! ---- Read namelist if provided ----
@@ -95,7 +96,8 @@ program bio_driver
   else
     write(*,'(a)')        ' founder m_repr    :  = m_init (no spread)'
   end if
-  write(*,'(a,1pe10.3,a)') ' biomass pool    : ', b_total_kg*b_factor, ' kg (conserved)'
+  write(*,'(a,1pe10.3,a)') ' biomass pool    : ', b_total_kg*b_factor, ' kg (initial)'
+  write(*,'(a,1pe10.3,a)') ' bottom flux     : ', biomass_flux,        ' kg/day'
   write(*,'(a,f8.2,a)') ' Timestep         : ', dt_hrs,          ' hours'
   write(*,'(a,f8.1,a)') ' Sim length       : ', t_sim_years,     ' years'
   write(*,'(a,i8)')     ' Total steps      : ', n_steps
@@ -119,7 +121,8 @@ program bio_driver
     call random_seed(put=seed)
 
     call bio_init_run(n_init_orgs, m_init, v_conv, halflife, &
-                      dt_hrs, b_total_kg, b_factor, growth_rate_day, mrepr_seed_max)
+                      dt_hrs, b_total_kg, b_factor, growth_rate_day, &
+                      mrepr_seed_max, biomass_flux)
 
     ! Open output files for this member
     write(fname,'(a,"/ensemble_",i3.3,"_state.dat")') trim(outdir), iens

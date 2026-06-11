@@ -67,5 +67,9 @@ module bio_params
   ! used to test whether seeding some founders near the neutral-buoyancy mass
   ! (m_eq ~ 2.4e-11 kg) lets a floating population establish from a cold start.
   real(8), parameter :: MRSEED_DEF  = 0.0d0
+  ! Tunable food flux into the bottom level [kg/day], representing biomass supply
+  ! from below the AHZ.  Default 0 (no external supply).  Use to probe how much
+  ! bottom flux is required to sustain a population against boundary losses.
+  real(8), parameter :: BFLUX_DEF   = 0.0d0
 
 end module bio_params

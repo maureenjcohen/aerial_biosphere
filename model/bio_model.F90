@@ -22,10 +22,17 @@
 ! Timestep order (per Yates Sect. 2.2): eat -> move -> AHZ check ->
 !                                        reproduce -> age/die
 !
-! Biomass cycles locally: organisms consume from the pool in their level and,
-! when they die of old age (half-life), return their mass to the biomass of the
-! level where they died.  Organisms that leave the AHZ (washout) carry their mass
-! out of the domain — that biomass is LOST from the pool (it is not conserved).
+! Biomass bookkeeping (the pool is not conserved — it has sources and sinks):
+!   - eating moves biomass from a level into the organism;
+!   - a half-life (old-age) death returns the organism's mass to the biomass of
+!     the level where it died (local return);
+!   - an organism convected out the TOP of the AHZ is removed and its mass is lost
+!     (carried out of the domain by the updraft — the top sink);
+!   - an organism that sinks out the BOTTOM of the AHZ likewise carries its mass
+!     out and it is lost;
+!   - the biomass field is ADVECTED UPWARD by the convective updraft (v_conv):
+!     food enters through the bottom boundary at biomass_flux [kg/day], is carried
+!     up through the AHZ, and is lost through the top (see advect_biomass).
 !
 ! Growth is BIOMASS-LIMITED (Yates Sect. 2.2): an organism's growth is limited
 ! only by the biomass available in its level, not by a fixed maximum rate.  The
@@ -67,6 +74,8 @@ module bio_model
   real(8), save :: halflife_days
   real(8), save :: dt_s          ! timestep [s]
   real(8), save :: growth_rate   ! max fractional growth rate [/day]
+  ! private: avoids a name clash with the driver's namelist variable of the same name
+  real(8), save, private :: biomass_flux  ! tunable food flux into bottom level [kg/day]
 
 contains
 
@@ -167,10 +176,10 @@ contains
   ! Initialise one ensemble member
   !--------------------------------------------------------------------
   subroutine bio_init_run(n_init, m_init, v_conv, halflife, dt_hrs, &
-                          b_ref_kg, b_factor, grwth, mrepr_seed_max)
+                          b_ref_kg, b_factor, grwth, mrepr_seed_max, bflux)
     integer, intent(in) :: n_init
     real(8), intent(in) :: m_init, v_conv, halflife, dt_hrs
-    real(8), intent(in) :: b_ref_kg, b_factor, grwth, mrepr_seed_max
+    real(8), intent(in) :: b_ref_kg, b_factor, grwth, mrepr_seed_max, bflux
     integer  :: i
     real(8)  :: u, z0, G0, rho0, B_total, m0
 
@@ -178,6 +187,7 @@ contains
     halflife_days = halflife
     dt_s         = dt_hrs * 3600.0d0
     growth_rate  = grwth
+    biomass_flux = bflux
 
     ! Allocate / reset organism arrays
     n_slots = MAX_ORGS
@@ -192,7 +202,8 @@ contains
     n_free    = n_slots
 
     ! Biomass pool: initial total = b_ref_kg * b_factor, spread evenly.  The pool
-    ! is no longer globally conserved — washout deaths remove biomass (see bio_step).
+    ! is not conserved — boundary-exit deaths remove biomass, the bottom flux adds
+    ! it, and it is advected upward and lost at the top (see bio_step).
     if (allocated(biomass))        deallocate(biomass)
     if (allocated(mass_lev_start)) deallocate(mass_lev_start)
     if (allocated(biomass_avail))  deallocate(biomass_avail)
@@ -235,8 +246,8 @@ contains
     real(8)  :: G_c, rho_c, mrepr_c
     real(8)  :: u, p_death, noise
 
-    n_born  = 0
-    n_died  = 0
+    n_born = 0
+    n_died = 0
 
     ! Per-timestep death probability from exponential decay with half-life
     p_death = 1.0d0 - 2.0d0**(-dt_s / (halflife_days * SEC_PER_DAY))
@@ -287,6 +298,9 @@ contains
       org_z(i) = org_z(i) + dz
 
       ! -- 3. AHZ boundary check --
+      !    An organism that leaves the AHZ at either boundary is removed and its
+      !    mass is lost from the domain (top: carried up and out by the updraft;
+      !    bottom: sinks out below).
       if (org_z(i) < 0.0d0 .or. org_z(i) > Z_AHZ_TOP) then
         call kill_organism(i)
         n_died = n_died + 1
@@ -325,8 +339,8 @@ contains
 
       ! -- 5. Age and stochastic death --
       !    A half-life death deposits the organism's mass into the biomass of the
-      !    level where it died (local return).  Biomass of organisms that left the
-      !    AHZ (washout, step 3) is lost — handled by skipping the deposit there.
+      !    level where it died (local return).  Boundary-exit deaths are handled in
+      !    step 3 (top exit returned at end of step; bottom exit lost).
       org_age(i) = org_age(i) + dt_s / SEC_PER_DAY
       call random_number(u)
       if (u < p_death) then
@@ -339,7 +353,51 @@ contains
 
     end do
 
+    ! -- 6. Advect the biomass field upward; inject the bottom flux, lose at top --
+    call advect_biomass()
+
   end subroutine bio_step
+
+  !--------------------------------------------------------------------
+  ! Advect the biomass field upward with the convective updraft v_conv.
+  ! Finite-volume first-order upwind, sub-stepped to satisfy the CFL
+  ! condition (the per-step Courant number is large, ~20, because the
+  ! updraft crosses many levels per timestep).  Food enters through the
+  ! bottom boundary at biomass_flux [kg/day] and is carried out (lost)
+  ! through the top boundary.  Levels run 1 = bottom .. n_lev = top.
+  !--------------------------------------------------------------------
+  subroutine advect_biomass()
+    integer :: k, isub, n_sub
+    real(8) :: dz_lev, courant, c_sub, dt_sub, inflow
+    real(8) :: flux_up(n_lev)
+
+    if (v_conv_ms <= 0.0d0) then
+      ! No updraft: the bottom source (if any) simply accumulates in level 1.
+      if (biomass_flux > 0.0d0) &
+        biomass(1) = biomass(1) + biomass_flux * (dt_s / SEC_PER_DAY)
+      return
+    end if
+
+    dz_lev  = Z_AHZ_TOP / real(n_lev - 1, 8)
+    courant = v_conv_ms * dt_s / dz_lev
+    n_sub   = max(1, ceiling(courant))
+    c_sub   = courant / real(n_sub, 8)               ! <= 1 (CFL-stable)
+    dt_sub  = dt_s / real(n_sub, 8)
+    inflow  = biomass_flux * (dt_sub / SEC_PER_DAY)   ! bottom inflow per sub-step [kg]
+
+    do isub = 1, n_sub
+      ! Upwind: fraction c_sub of each cell's biomass crosses its upper face.
+      do k = 1, n_lev
+        flux_up(k) = c_sub * biomass(k)
+      end do
+      ! Each cell loses its upward flux and gains the cell-below's flux.
+      ! flux_up(n_lev) exits the top and is lost; inflow enters at the bottom.
+      do k = n_lev, 2, -1
+        biomass(k) = biomass(k) - flux_up(k) + flux_up(k-1)
+      end do
+      biomass(1) = biomass(1) - flux_up(1) + inflow
+    end do
+  end subroutine advect_biomass
 
   !--------------------------------------------------------------------
   ! Write current organism state to an open file unit (one line/organism)
