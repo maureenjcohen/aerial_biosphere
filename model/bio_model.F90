@@ -54,7 +54,7 @@ module bio_model
   real(8), allocatable, save :: org_radius(:)  ! outer radius R [m]
   real(8), allocatable, save :: org_G(:)       ! growth strategy [-]
   real(8), allocatable, save :: org_rho(:)     ! skin density [kg/m^3]
-  real(8), allocatable, save :: org_mrepr(:)   ! reproduction mass [kg]
+  real(8), allocatable, save :: org_mrepr(:)   ! reproduction mass [kg] (~birth mass)
   real(8), allocatable, save :: org_age(:)     ! age [days]
   logical, allocatable, save :: org_alive(:)
 
@@ -181,7 +181,7 @@ contains
     real(8), intent(in) :: m_init, v_conv, halflife, dt_hrs
     real(8), intent(in) :: b_ref_kg, b_factor, grwth, mrepr_seed_max, bflux
     integer  :: i
-    real(8)  :: u, z0, G0, rho0, B_total, m0
+    real(8)  :: u, z0, G0, rho0, m0
 
     v_conv_ms    = v_conv
     halflife_days = halflife
@@ -201,25 +201,32 @@ contains
     n_orgs    = 0
     n_free    = n_slots
 
-    ! Biomass pool: initial total = b_ref_kg * b_factor, spread evenly.  The pool
-    ! is not conserved — boundary-exit deaths remove biomass, the bottom flux adds
-    ! it, and it is advected upward and lost at the top (see bio_step).
+    ! Biomass field: there is NO separate initial pool.  Food is supplied solely
+    ! by the continuous bottom flux (biomass_flux), advected upward and lost at the
+    ! top.  Initialise each level to the steady-state standing biomass the flux
+    ! sustains in advection balance — flux * dz_lev / (v_conv * SEC_PER_DAY) — so
+    ! the food supply is continuous and constant from t=0 with no startup
+    ! transient.  (b_ref_kg / b_factor are retained in the interface but no longer
+    ! seed an initial pool.)
     if (allocated(biomass))        deallocate(biomass)
     if (allocated(mass_lev_start)) deallocate(mass_lev_start)
     if (allocated(biomass_avail))  deallocate(biomass_avail)
     allocate(biomass(n_lev), mass_lev_start(n_lev), biomass_avail(n_lev))
-    B_total  = b_ref_kg * b_factor
-    biomass  = B_total / real(n_lev, 8)
+    if (v_conv > 0.0d0 .and. bflux > 0.0d0) then
+      biomass = bflux * (Z_AHZ_TOP / real(n_lev - 1, 8)) / (v_conv * SEC_PER_DAY)
+    else
+      biomass = 0.0d0
+    end if
     mass_lev_start = 0.0d0
     biomass_avail  = 0.0d0
 
     ! Seed initial organisms with random properties throughout the AHZ.
-    ! Founder mass / reproduction mass: by default all founders start at m_init
-    ! (mrepr_seed_max <= m_init).  If mrepr_seed_max > m_init, the founder mass is
-    ! drawn log-uniformly over [m_init, mrepr_seed_max] and m_repr is set to that
-    ! mass (Yates: "reproduction mass is close to the birth mass").  This tests
-    ! whether seeding some founders near the neutral-buoyancy mass lets a floating
-    ! sub-population establish from a cold start.
+    ! Founder mass = reproduction mass.  By default founders start small at m_init
+    ! (mrepr_seed_max <= m_init) — Yates' cold start, each founder's reproduction
+    ! mass equal to its birth mass.  Organisms then grow and reproduce per Yates
+    ! Sect. 2.2 (nc = floor(mass/m_repr) - 1 progeny at ~m_repr).  The legacy
+    ! mrepr_seed_max > m_init path (founders drawn log-uniformly up to
+    ! mrepr_seed_max) is retained for backward-compatible experiments only.
     do i = 1, n_init
       call random_number(u);  z0   = u * Z_AHZ_TOP
       call random_number(u);  G0   = G_MIN + u * (G_MAX - G_MIN)
@@ -307,11 +314,15 @@ contains
         cycle
       end if
 
-      ! -- 4. Reproduce --
-      !    Progeny are born at the parent's reproduction mass with mutated traits.
-      !    Stop if the population is at the cap (n_free == 0) and debit the parent
-      !    only for progeny actually created, so biomass stays conserved even when
-      !    offspring are discarded at the cap.
+      ! -- 4. Reproduce (Yates 2017 Sect. 2.2) --
+      !    Each timestep an organism produces nc = floor(mass/m_repr) - 1 progeny
+      !    (the "-1" leaves the parent with some mass; the parent persists).  Each
+      !    progeny is born at the parent's reproduction mass with inherited traits
+      !    perturbed by mutation: G and rho by normal draws, m_repr by a 10%
+      !    log-normal draw.  A fast-growing organism at several * m_repr therefore
+      !    sheds several small daughters at once.  Births stop if the population is
+      !    at the cap (n_free == 0); the parent is debited only for progeny
+      !    actually created, so biomass stays conserved.
       nc = int(org_mass(i) / org_mrepr(i)) - 1
       if (nc >= 1) then
         nc_made = 0

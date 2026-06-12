@@ -7,3 +7,6 @@
 *.o
 *.mod
 bio_1d
+ensemble_output/
+sweep_output/
+planning/

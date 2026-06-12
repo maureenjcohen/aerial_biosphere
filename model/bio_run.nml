@@ -11,9 +11,9 @@
   m_init          = 1.0e-12    ! cold start (Yates Table 1 control = 1e-9 g) [kg]
   halflife        = 30.0       ! organism half-life [days]
   growth_rate_day = 2.5        ! max specific growth rate (NPZ mu_max, Franks 2002) [/day]
-  mrepr_seed_max  = 3.0e-11    ! founder m_repr log-uniform spread up to this mass [kg]; needed to establish
-  biomass_flux    = 2.5e-8     ! food flux into the bottom level [kg/day]; ~Yates B=1 carrying capacity
-  b_total_kg      = 1.0e-6    ! total conserved biomass pool [kg]  (B=1 control)
+  mrepr_seed_max  = 0.0        ! retired: founders start small at m_init (Yates cold start)
+  biomass_flux    = 8.0e-7     ! continuous food flux [kg/day]; sustains ~1e-6 kg standing (Yates B=1 scale)
+  b_total_kg      = 1.0e-6    ! UNUSED: no initial pool; food is the continuous flux above
   b_factor        = 1.0        ! biomass scaling (1 = default, 3 = population increase test)
 
   ! Atmospheric dynamics
