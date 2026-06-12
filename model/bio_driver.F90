@@ -23,16 +23,17 @@ program bio_driver
   implicit none
 
   ! ---- Namelist ----
-  integer            :: n_ensemble, n_init_orgs, seed_base, n_levels
+  integer            :: n_ensemble, n_init_orgs, seed_base, n_levels, eat_mode
   real(8)            :: v_conv, halflife, dt_hrs, t_sim_years
   real(8)            :: m_init, b_factor, b_total_kg, growth_rate_day
-  real(8)            :: tau_conv_s, mrepr_seed_max, biomass_flux
+  real(8)            :: tau_conv_s, mrepr_seed_max, biomass_flux, uptake_exp
   character(len=256) :: outdir
 
   namelist /bio_run/ n_ensemble, n_init_orgs, seed_base, n_levels,   &
                      v_conv, halflife, dt_hrs, t_sim_years,           &
                      m_init, b_factor, b_total_kg, growth_rate_day,   &
-                     tau_conv_s, mrepr_seed_max, biomass_flux, outdir
+                     tau_conv_s, mrepr_seed_max, biomass_flux,        &
+                     uptake_exp, eat_mode, outdir
 
   ! ---- Local variables ----
   integer  :: iens, istep, n_steps, n_steps_per_day, n_steps_last_yr
@@ -58,6 +59,8 @@ program bio_driver
   tau_conv_s      = 7000.0d0
   mrepr_seed_max  = MRSEED_DEF
   biomass_flux    = BFLUX_DEF
+  uptake_exp      = 1.0d0          ! biomass-uptake mass exponent (1 = share by mass)
+  eat_mode        = 0              ! consumption model: 0 = shared, 1 = deplete
   outdir          = 'output'
 
   ! ---- Read namelist if provided ----
@@ -122,7 +125,7 @@ program bio_driver
 
     call bio_init_run(n_init_orgs, m_init, v_conv, halflife, &
                       dt_hrs, b_total_kg, b_factor, growth_rate_day, &
-                      mrepr_seed_max, biomass_flux)
+                      mrepr_seed_max, biomass_flux, uptake_exp, eat_mode)
 
     ! Open output files for this member
     write(fname,'(a,"/ensemble_",i3.3,"_state.dat")') trim(outdir), iens
@@ -134,6 +137,11 @@ program bio_driver
     open(21, file=trim(fname), status='replace')
     write(21,'(a)') '# day  n_orgs'
 
+    ! Time-resolved mass-distribution histogram (one snapshot per day)
+    write(fname,'(a,"/ensemble_",i3.3,"_masshist.dat")') trim(outdir), iens
+    open(22, file=trim(fname), status='replace')
+    call bio_masshist_header(22)
+
     ! ---- Time loop ----
     do istep = 1, n_steps
 
@@ -143,6 +151,7 @@ program bio_driver
       if (mod(istep, n_steps_per_day) == 0) then
         write(21,'(f10.2,i8)') &
           real(istep, 8) * dt_hrs / 24.0d0, n_orgs
+        call bio_write_masshist(22, real(istep, 8) * dt_hrs / 24.0d0)
       end if
 
       ! Annual progress to stdout
@@ -162,6 +171,7 @@ program bio_driver
 
     close(20)
     close(21)
+    close(22)
 
     write(*,'(a,i3,a,i6,a)') &
       ' Member', iens, ' done.  Final population:', n_orgs, ' organisms.'

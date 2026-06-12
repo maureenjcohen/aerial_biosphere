@@ -39,11 +39,11 @@ module bio_params
   real(8), parameter :: SIG_MREPR   = 0.10d0            ! fractional std dev for m_repr (log-normal)
 
   ! ---- Maximum population size ----
-  ! Sized well above the Yates B=1 carrying capacity (~B_total/m_eq ~= 50000) so
-  ! the flux-driven steady state at biomass_flux ~ 2.5e-8 kg/day (mean ~48000,
-  ! fluctuation peaks ~59000) equilibrates with headroom and offspring are not
-  ! discarded against the cap.
-  integer, parameter :: MAX_ORGS    = 80000
+  ! Hard array cap, sized ABOVE the emergent cold-start carrying capacity so the
+  ! population equilibrates freely (offspring not discarded against the cap).  The
+  ! cold-start config (biomass_flux ~ 1e-7 kg/day, mu_max 16/day) settles well under
+  ! this; raise further if a run pegs the cap.
+  integer, parameter :: MAX_ORGS    = 300000
 
   ! ---- Default simulation parameters (overridable by namelist) ----
   integer, parameter :: N_ENS_DEF   = 20                ! ensemble members

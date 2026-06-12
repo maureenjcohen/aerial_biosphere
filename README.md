@@ -63,26 +63,28 @@ Output (organism state snapshots and population time series) is written per
 member; the plotting scripts and `reproduce_yates_fig3.ipynb` in `validation/`
 turn it into figures.
 
-The control run reproduces the Yates (2017) Figure 3 distributions: a steady
-population of ~50,000 organisms with a mass distribution peaking near 2×10⁻⁸ g
-(radius ~15.6 μm) and growth strategy *G* evolving toward the solid end.
+The control run reproduces the Yates (2017) Figure 3 *distributions*: a steady
+population whose mass distribution peaks near 2×10⁻⁸ g (radius ~15.6 μm), with
+growth strategy *G* evolving toward the solid end and organisms concentrated in
+the upper AHZ. Validation targets the per-organism distributions and steady-state
+stationarity — not an absolute population count, which Yates do not report and
+which here is simply set by the chosen food supply.
 
 ## Differences from Yates (2017)
 
-This model follows Yates closely but changes two things — the initial conditions
-and how biomass is supplied — both controlled from `model/bio_run.nml`.
+This model follows Yates closely but makes a few implementation choices the paper
+leaves open. All are controlled from `model/bio_run.nml`.
 
-### Initial conditions
+### Initial conditions — genuine cold start
 
-Like Yates, the population starts cold: 100 founder organisms at an initial mass
-`m_init = 1×10⁻¹² kg` (Yates' "approximate mass of 10⁻⁹ g").
-
-Organisms reproduce at a fixed reproduction mass `m_repr`. If every founder is
-pinned at `m_init`, none can grow to the neutral-buoyancy mass before being swept
-out of the AHZ, and the population washes out before it can establish. To let the
-population establish and self-organize to the Yates steady state, the founders'
-reproduction mass is seeded from a log-uniform spread up to `mrepr_seed_max`
-(default 3×10⁻¹¹ kg).
+The population starts cold, as in Yates: 100 founder organisms at an initial mass
+`m_init = 1×10⁻¹² kg` (Yates' "approximate mass of 10⁻⁹ g"), with random growth
+strategy, density, and altitude. Each founder's reproduction mass equals its birth
+mass, so the population must grow and self-organize to a stable mass/size strategy
+on its own. A high maximum specific growth rate (`growth_rate_day`, the μ_max
+ceiling) lets founders grow toward the neutral-buoyancy mass before convection
+sweeps them out of the AHZ, so the population establishes from the cold start with
+**no founder seeding**.
 
 ### Biomass supply and boundaries
 
@@ -90,20 +92,48 @@ Yates uses a fixed, conserved biomass pool. Here the food supply is an open
 conveyor instead:
 
 - **Source.** Biomass enters at the bottom of the AHZ at a tunable rate
-  `biomass_flux` [kg/day], is advected upward by convection, and is consumed by
-  organisms along the way.
-- **Sinks.** Both AHZ boundaries are absorbing: organisms that leave through the
-  top or bottom are removed and their biomass is lost. The top in particular is a
-  pure sink — microbes carried aloft by updrafts have no mechanism to rain back
-  down.
+  `biomass_flux` [kg/day] and is advected upward by convection.
+- **Recycling.** When an organism dies of old age inside the domain, its mass is
+  returned to the biomass of the layer where it died.
+- **Sinks.** Both AHZ boundaries are absorbing: organisms (and any biomass) that
+  leave through the top or bottom are removed. The top in particular is a pure
+  sink — microbes carried aloft by updrafts have no mechanism to rain back down.
 
-This makes `biomass_flux` the control parameter that sets the sustainable
-population size. The population scales approximately linearly with the flux: a
-flux of ~2×10⁻¹¹ kg/day is the minimum that sustains a population, while
-~2.5×10⁻⁸ kg/day reproduces the Yates control carrying capacity (~50,000
-organisms). The per-organism mass distribution is set by the atmospheric physics
-and is independent of the flux — the flux changes *how many* organisms persist,
-not *how large* they are.
+`biomass_flux` therefore sets the carrying capacity: more food supports more
+organisms. The absolute population is a free parameter of the model — Yates report
+no population count, only that the total is steady — so the per-organism mass
+distribution (which the atmospheric physics fixes) is what we validate, not the
+headcount.
+
+### Biomass consumption and growth
+
+Each timestep an organism grows by consuming biomass from its atmospheric layer.
+The layer's available biomass `B_layer` is **shared** among the organisms there in
+proportion to `mass^p`, where `p = uptake_exp`:
+
+```
+dBᵢ = ( B_layer · mᵢ^p / Σⱼ mⱼ^p ),   capped at   μ_max · Δt · mᵢ
+```
+
+Consumed biomass becomes organism mass one-to-one (`mᵢ → mᵢ + dBᵢ`), and the
+layer's biomass is debited so it cannot go negative.
+
+- With `uptake_exp = 1` (default) the share is proportional to mass, so every
+  organism grows at the same specific rate `dBᵢ/mᵢ` regardless of size — consistent
+  with Yates, who redistribute biomass "as a function of organism weight."
+- With `uptake_exp < 1` (e.g. 2/3, surface-area-limited uptake) smaller organisms
+  receive a higher specific growth rate. Yates did not include this; it is a
+  physically-motivated lever kept for future experiments (e.g. the Venus AHZ).
+
+The maximum specific growth rate `growth_rate_day` (μ_max) caps how fast an
+organism can grow in one step. It only binds transiently — when food is locally
+abundant, such as during cold-start establishment — because in a food-limited
+steady state the shared portion is the smaller term and actual growth runs well
+below the cap.
+
+(An experimental alternative consumption model, `eat_mode = 1`, lets organisms
+deplete the layer biomass at μ_max in turn rather than share it; the default
+`eat_mode = 0` is the shared model described above.)
 
 ## Reference
 

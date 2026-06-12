@@ -8,13 +8,19 @@
 
   ! Organism lifecycle
   n_init_orgs     = 100        ! initial population per member (Yates Table 1)
-  m_init          = 1.0e-12    ! cold start (Yates Table 1 control = 1e-9 g) [kg]
+  m_init          = 1.0e-12    ! genuine cold start (Yates Table 1 control = 1e-9 g) [kg]
   halflife        = 30.0       ! organism half-life [days]
-  growth_rate_day = 2.5        ! max specific growth rate (NPZ mu_max, Franks 2002) [/day]
-  mrepr_seed_max  = 0.0        ! retired: founders start small at m_init (Yates cold start)
-  biomass_flux    = 8.0e-7     ! continuous food flux [kg/day]; sustains ~1e-6 kg standing (Yates B=1 scale)
+  growth_rate_day = 16.0       ! max specific growth rate (mu_max) [/day]; high ceiling lets a cold
+                               !   start establish, only binds transiently (steady growth food-limited)
+  mrepr_seed_max  = 0.0        ! no founder seeding — genuine cold start
+  biomass_flux    = 1.0e-7     ! continuous food flux [kg/day]; sets the carrying capacity
   b_total_kg      = 1.0e-6    ! UNUSED: no initial pool; food is the continuous flux above
-  b_factor        = 1.0        ! biomass scaling (1 = default, 3 = population increase test)
+  b_factor        = 1.0        ! UNUSED (legacy)
+
+  ! Biomass consumption -> growth
+  uptake_exp      = 1.0        ! uptake mass exponent: share by mass^p (1 = Yates weight-proportional;
+                               !   <1 e.g. 2/3 = surface-area, small-organism advantage, future lever)
+  eat_mode        = 0          ! 0 = shared pool (settled default); 1 = deplete (experimental)
 
   ! Atmospheric dynamics
   v_conv          = 1.0        ! convective velocity [m/s]  (= 100 cm/s, control run)

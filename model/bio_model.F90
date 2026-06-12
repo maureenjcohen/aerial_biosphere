@@ -76,6 +76,17 @@ module bio_model
   real(8), save :: growth_rate   ! max fractional growth rate [/day]
   ! private: avoids a name clash with the driver's namelist variable of the same name
   real(8), save, private :: biomass_flux  ! tunable food flux into bottom level [kg/day]
+  ! Biomass-uptake mass exponent p: an organism's share of its layer's biomass is
+  ! proportional to mass^p.  p=1 (default) -> specific growth dB/mass independent of
+  ! size; p<1 (e.g. 2/3, surface-area-limited) gives small organisms a higher specific
+  ! growth rate.  Used only in the shared consumption model (eat_mode=0).  Private to
+  ! avoid a clash with the driver's namelist variable.
+  real(8), save, private :: uptake_exp = 1.0d0
+  ! Consumption model: 0 = SHARED (proportional slice of the layer's frozen biomass
+  ! pool, original); 1 = DEPLETE (each organism grows at mu_max drawn from the live,
+  ! decrementing layer biomass in processing order, so some overshoot and others
+  ! starve).  Deplete requires growth_rate > 0 (mu_max) and ignores uptake_exp.
+  integer, save, private :: eat_mode = 0
 
 contains
 
@@ -176,10 +187,12 @@ contains
   ! Initialise one ensemble member
   !--------------------------------------------------------------------
   subroutine bio_init_run(n_init, m_init, v_conv, halflife, dt_hrs, &
-                          b_ref_kg, b_factor, grwth, mrepr_seed_max, bflux)
+                          b_ref_kg, b_factor, grwth, mrepr_seed_max, bflux, &
+                          uptake_p, eat_m)
     integer, intent(in) :: n_init
     real(8), intent(in) :: m_init, v_conv, halflife, dt_hrs
-    real(8), intent(in) :: b_ref_kg, b_factor, grwth, mrepr_seed_max, bflux
+    real(8), intent(in) :: b_ref_kg, b_factor, grwth, mrepr_seed_max, bflux, uptake_p
+    integer, intent(in) :: eat_m
     integer  :: i
     real(8)  :: u, z0, G0, rho0, m0
 
@@ -188,6 +201,8 @@ contains
     dt_s         = dt_hrs * 3600.0d0
     growth_rate  = grwth
     biomass_flux = bflux
+    uptake_exp   = uptake_p
+    eat_mode     = eat_m
 
     ! Allocate / reset organism arrays
     n_slots = MAX_ORGS
@@ -259,16 +274,17 @@ contains
     ! Per-timestep death probability from exponential decay with half-life
     p_death = 1.0d0 - 2.0d0**(-dt_s / (halflife_days * SEC_PER_DAY))
 
-    ! Pre-pass: freeze each level's organism mass and biomass for biomass-limited
-    ! growth.  Growth shares a level's biomass among its organisms by mass, so we
-    ! need the level totals as they stand at the start of the step (before any
-    ! eating, moving, births, or deaths).  Using frozen values makes each
-    ! organism's share independent of processing order.
+    ! Pre-pass: freeze each level's total uptake weight and biomass for biomass-
+    ! limited growth.  An organism's share of its level's biomass is proportional to
+    ! mass^uptake_exp, so mass_lev_start holds sum(mass^uptake_exp) over the level as
+    ! it stands at the start of the step (before any eating, moving, births, or
+    ! deaths).  Using frozen values makes each organism's share independent of
+    ! processing order.
     mass_lev_start = 0.0d0
     do i = 1, n_slots
       if (.not. org_alive(i)) cycle
       lev = atm_level(org_z(i))
-      mass_lev_start(lev) = mass_lev_start(lev) + org_mass(i)
+      mass_lev_start(lev) = mass_lev_start(lev) + org_mass(i)**uptake_exp
     end do
     biomass_avail = biomass
 
@@ -280,22 +296,31 @@ contains
       call atm_rhovisc(org_z(i), rho_loc, nu_loc)
 
       ! -- 1. Eat: biomass-limited growth (Yates 2017 Sect. 2.2) --
-      !    Growth is limited only by available biomass, not by a fixed rate.
-      !    The organism consumes a share of its level's biomass in proportion to
-      !    its mass.  The live min(., biomass(lev)) guard keeps biomass >= 0 and
-      !    stops organisms born this step (not in mass_lev_start) from consuming
-      !    biomass their parent already took.  An optional max specific growth
-      !    rate is applied only if growth_rate > 0 (Yates uses none).
-      if (mass_lev_start(lev) > 0.0d0 .and. biomass_avail(lev) > 0.0d0) then
-        dB = biomass_avail(lev) * org_mass(i) / mass_lev_start(lev)
-        if (growth_rate > 0.0d0) &
-          dB = min(dB, growth_rate * (dt_s / SEC_PER_DAY) * org_mass(i))
-        dB = min(dB, biomass(lev))
-        if (dB > 0.0d0) then
-          org_mass(i)   = org_mass(i) + dB
-          biomass(lev)  = biomass(lev) - dB
-          org_radius(i) = mass_to_radius(org_mass(i), org_G(i), org_rho(i))
+      !    Two consumption models (eat_mode):
+      !    0 SHARED  : the organism takes a slice of its layer's FROZEN pool in
+      !                proportion to mass^uptake_exp; min(., biomass(lev)) keeps the
+      !                live pool >= 0.  Every organism grows the same step at the
+      !                food-limited rate -> no overshoot.
+      !    1 DEPLETE : the organism grows at mu_max (= growth_rate), drawn from the
+      !                LIVE, decrementing layer biomass in processing order.  Early
+      !                organisms overshoot (become "pumps"); once the pool is drawn
+      !                down, later ones starve.  Requires growth_rate > 0.
+      dB = 0.0d0
+      if (eat_mode == 0) then
+        if (mass_lev_start(lev) > 0.0d0 .and. biomass_avail(lev) > 0.0d0) then
+          dB = biomass_avail(lev) * org_mass(i)**uptake_exp / mass_lev_start(lev)
+          if (growth_rate > 0.0d0) &
+            dB = min(dB, growth_rate * (dt_s / SEC_PER_DAY) * org_mass(i))
+          dB = min(dB, biomass(lev))
         end if
+      else
+        if (biomass(lev) > 0.0d0 .and. growth_rate > 0.0d0) &
+          dB = min(growth_rate * (dt_s / SEC_PER_DAY) * org_mass(i), biomass(lev))
+      end if
+      if (dB > 0.0d0) then
+        org_mass(i)   = org_mass(i) + dB
+        biomass(lev)  = biomass(lev) - dB
+        org_radius(i) = mass_to_radius(org_mass(i), org_G(i), org_rho(i))
       end if
 
       ! -- 2. Move: constant upward convection + sedimentation (Yates 2017 Sect. 2.2) --
@@ -424,6 +449,43 @@ contains
         org_rho(i), org_age(i), org_radius(i) * (1.0d0 - org_G(i))
     end do
   end subroutine bio_write_state
+
+  !--------------------------------------------------------------------
+  ! Time-resolved mass-distribution diagnostic.  Writes one line per call:
+  !   day  N1 N2 ... N_NB    (counts of live organisms in NB log10(mass/kg)
+  ! bins from MH_LO to MH_HI).  Lets us watch the distribution / tail evolve
+  ! over the run without dumping every organism every step.
+  !--------------------------------------------------------------------
+  subroutine bio_write_masshist(iunit, day)
+    integer, intent(in) :: iunit
+    real(8), intent(in) :: day
+    integer, parameter  :: NB = 30
+    real(8), parameter  :: MH_LO = -13.0d0, MH_HI = -10.0d0   ! log10(mass/kg)
+    integer :: hist(NB), i, b
+    hist = 0
+    do i = 1, n_slots
+      if (.not. org_alive(i)) cycle
+      if (org_mass(i) <= 0.0d0) cycle
+      b = int((log10(org_mass(i)) - MH_LO) / (MH_HI - MH_LO) * real(NB, 8)) + 1
+      b = max(1, min(NB, b))
+      hist(b) = hist(b) + 1
+    end do
+    write(iunit, '(f10.2, 30(1x,i7))') day, hist
+  end subroutine bio_write_masshist
+
+  ! Header line for the mass-history file: the NB log10(mass/kg) bin centers.
+  subroutine bio_masshist_header(iunit)
+    integer, intent(in) :: iunit
+    integer, parameter  :: NB = 30
+    real(8), parameter  :: MH_LO = -13.0d0, MH_HI = -10.0d0
+    integer :: b
+    write(iunit, '(a)', advance='no') '# day  counts in log10(mass/kg) bin centers:'
+    do b = 1, NB
+      write(iunit, '(1x,f6.2)', advance='no') &
+        MH_LO + (real(b, 8) - 0.5d0) / real(NB, 8) * (MH_HI - MH_LO)
+    end do
+    write(iunit, '(a)') ''
+  end subroutine bio_masshist_header
 
   subroutine bio_cleanup()
     if (allocated(org_z))        deallocate(org_z)
