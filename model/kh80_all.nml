@@ -1,0 +1,6 @@
+&cloud_run
+  indir="../inputs"
+  src_mode1=3
+  src_mode2=3
+  src_mode3=3
+/
