@@ -1,13 +1,14 @@
 # Files
 *.pdf
-*.txt
 *.dat
 *.log 
 *.png
 *.o
 *.mod
 bio_1d
+model/output
 ensemble_output/
 sweep_output/
 planning/
 bio_cloud
+
