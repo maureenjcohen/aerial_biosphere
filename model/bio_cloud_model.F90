@@ -1,14 +1,21 @@
 !======================================================================
 ! bio_cloud_model.F90
 ! Venus cloud biosphere model (Seager-cycle carrying-capacity diagnostic)
+! ENVIRONMENT MODULE: the static cloud column + its physics.  The organism
+! store, 3-state lifecycle and transport live in module bio_venus (which uses
+! this one); the run driver is bio_venus_driver.F90.
 !
-! STEP 1 (this file, for now): the source-agnostic input layer.
+! Provides:
 !   cloud_read          : ingest the VPCM column (dynamics + master grid,
 !                         and the VPCM mode-1/2 droplet fields)
 !   cloud_assemble      : fill each mode's column (N, radius, width, dist
 !                         type) from a chosen SOURCE per mode
 !   cloud_build_spectrum: bin every active mode onto a shared radius grid
 !   cloud_diagnostics / cloud_summary / cloud_spectrum_check : logging
+!   host_capacity / host_supply / draw_host / host_capacity_sweep : packing
+!   viscosity_co2 / mean_free_path / cunningham / settling_velocity(_z) :
+!                         Stokes+slip settling (matched to VPCM new_cloud_sedim)
+!   col_interp / dKzz_dz : continuous-z interpolation of column fields
 !
 ! Each cloud particle mode m is described per level by:
 !   N_m(z)   number density          [m^-3]
@@ -101,9 +108,8 @@ module bio_cloud_model
   real(dp), parameter :: N_AVO      = 6.02214076e23_dp         ! Avogadro [1/mol]
   real(dp), parameter :: CO2_MOLRAD = 2.2e-10_dp               ! CO2 molecular radius [m] (VPCM)
   real(dp), parameter :: SLIP_A = 1.246_dp, SLIP_B = 0.42_dp, SLIP_C = 0.87_dp
-  ! Fixed desiccated-spore density [kg/m^3] (a knob; plan section 6).
-  real(dp), parameter, public :: RHO_SPORE_DEFAULT = 1200.0_dp
-  real(dp), save,      public :: rho_spore = RHO_SPORE_DEFAULT
+  ! (The organism store, 3-state machine, spore density and altitude bands now
+  !  live in module bio_venus, which uses this environment module.)
 
   ! ---- Haus et al. 2016 standard-model analytic parameters (per mode) ----
   ! N(z): piecewise top-hat with exponential tails (Haus Table 1 + Eq. T1).
@@ -119,9 +125,10 @@ module bio_cloud_model
   public :: cloud_read, cloud_assemble, cloud_build_spectrum
   public :: cloud_diagnostics, cloud_summary, cloud_spectrum_check, cloud_cleanup
   public :: src_name, set_source
-  public :: set_phi, set_rho_spore
+  public :: set_phi
   public :: host_capacity, host_supply, draw_host, host_capacity_sweep
-  public :: viscosity_co2, mean_free_path, cunningham, settling_velocity, settling_check
+  public :: viscosity_co2, mean_free_path, cunningham
+  public :: settling_velocity, settling_velocity_z, col_interp, dKzz_dz
   public :: nz, z, T, P, rho_air, w, Kzz, WSA, rho_host
   public :: Nm, rm, sm, validm, distm, srcm
   public :: r_bin, r_edge, specm, spec
@@ -790,11 +797,6 @@ contains
   !   static column.
   !====================================================================
 
-  subroutine set_rho_spore(val)
-    real(dp), intent(in) :: val
-    if (val > 0.0_dp) rho_spore = val
-  end subroutine set_rho_spore
-
   ! Dynamic viscosity of CO2 [Pa.s], Johnston & Grilly (1942) via Jones/
   ! Lennard-Jones (VPCM VISCOSITY_CO2; valid ~80-300 K).
   real(dp) function viscosity_co2(temp) result(mu)
@@ -824,64 +826,70 @@ contains
     Cc = 1.0_dp + kn*(SLIP_A + SLIP_B*exp(-SLIP_C/kn))
   end function cunningham
 
-  ! Terminal settling velocity [m/s], POSITIVE DOWNWARD, of a sphere of radius
-  ! r and density rho_p at level k.  Uses the ingested VPCM gas density.
-  ! (Net vertical motion in the lifecycle is w(k) - settling_velocity(...).)
-  real(dp) function settling_velocity(k, r, rho_p) result(vset)
-    integer,  intent(in) :: k
-    real(dp), intent(in) :: r, rho_p
+  ! Core terminal settling velocity [m/s], POSITIVE DOWNWARD, from local
+  ! atmosphere state (Tq,Pq,rho_a) for a sphere of radius r and density rho_p.
+  real(dp) function settling_core(Tq, Pq, rho_a, r, rho_p) result(vset)
+    real(dp), intent(in) :: Tq, Pq, rho_a, r, rho_p
     real(dp) :: mu, lam, Cc
     vset = 0.0_dp
     if (r <= 0.0_dp) return
-    mu  = viscosity_co2(T(k))
-    lam = mean_free_path(T(k), P(k))
+    mu  = viscosity_co2(Tq)
+    lam = mean_free_path(Tq, Pq)
     Cc  = cunningham(r, lam)
-    vset = (2.0_dp/9.0_dp) * (rho_p - rho_air(k)) * GRAV_VENUS * r*r / mu * Cc
+    vset = (2.0_dp/9.0_dp) * (rho_p - rho_a) * GRAV_VENUS * r*r / mu * Cc
+  end function settling_core
+
+  ! Settling at grid level k (uses the ingested VPCM gas density).
+  ! Net vertical motion in the lifecycle is w(k) - settling_velocity(...).
+  real(dp) function settling_velocity(k, r, rho_p) result(vset)
+    integer,  intent(in) :: k
+    real(dp), intent(in) :: r, rho_p
+    vset = settling_core(T(k), P(k), rho_air(k), r, rho_p)
   end function settling_velocity
 
-  ! Verification driver: settling vs radius at the peak-spectrum level, for a
-  ! host droplet (rho_host) and a desiccated spore (rho_spore).  Reports Kn and
-  ! the Stokes-only vs slip-corrected speeds so the slip regime is explicit.
-  subroutine settling_check(unit)
-    integer, intent(in) :: unit
-    integer,  parameter :: NR = 7
-    real(dp), parameter :: r_um(NR) = &
-         [0.1_dp, 0.2_dp, 0.5_dp, 1.0_dp, 2.0_dp, 4.0_dp, 10.0_dp]
-    real(dp) :: Npk, lam, mu, kn, Cc, vst, vsl, rr, rho_h
-    integer  :: i, k, kpk
+  ! Settling at an arbitrary altitude zq [m] (atmosphere fields interpolated).
+  real(dp) function settling_velocity_z(zq, r, rho_p) result(vset)
+    real(dp), intent(in) :: zq, r, rho_p
+    vset = settling_core(col_interp(T, zq), col_interp(P, zq), &
+                         col_interp(rho_air, zq), r, rho_p)
+  end function settling_velocity_z
 
-    Npk = 0.0_dp; kpk = 1
-    do k = 1, nz
-      if (sum(spec(:,k)) > Npk) then; Npk = sum(spec(:,k)); kpk = k; end if
-    end do
-    lam   = mean_free_path(T(kpk), P(kpk))
-    mu    = viscosity_co2(T(kpk))
-    rho_h = rho_host(kpk)
-    if (rho_h <= 0.0_dp) rho_h = 1900.0_dp        ! H2SO4 droplet fallback
+  !====================================================================
+  ! Column interpolation helpers (organisms live at continuous z)
+  !====================================================================
 
-    write(unit,'(a)') ' '
-    write(unit,'(a)') '----------------------------------------------------------'
-    write(unit,'(a)') ' SETTLING  v = (2/9)(rho_p-rho_air) g r^2/mu * Cc(r)  [Stokes+slip]'
-    write(unit,'(a,f6.2,a,f7.2,a,es10.3,a)') '  z = ', z(kpk)/1000.0_dp, &
-         ' km,  T = ', T(kpk), ' K,  P = ', P(kpk), ' Pa'
-    write(unit,'(a,es10.3,a,es10.3,a,f7.4,a)') '  rho_air = ', rho_air(kpk), &
-         ' kg/m3,  mu = ', mu, ' Pa.s,  lambda = ', lam*1.0e6_dp, ' um'
-    write(unit,'(a,f6.0,a,f6.0,a)') '  rho_host = ', rho_h, &
-         ' kg/m3,  rho_spore = ', rho_spore, ' kg/m3'
-    write(unit,'(a)') '   r[um]    Kn      Cc     host: vStokes  vSlip [mm/s]   spore: vSlip [mm/s]'
-    do i = 1, NR
-      rr  = r_um(i) * 1.0e-6_dp
-      kn  = lam / rr
-      Cc  = cunningham(rr, lam)
-      vst = (2.0_dp/9.0_dp) * (rho_h - rho_air(kpk)) * GRAV_VENUS * rr*rr / mu
-      vsl = settling_velocity(kpk, rr, rho_h)
-      write(unit,'(2x,f7.2,2x,f7.3,2x,f6.2,4x,es11.3,2x,es11.3,4x,es11.3)') &
-           r_um(i), kn, Cc, vst*1.0e3_dp, vsl*1.0e3_dp, &
-           settling_velocity(kpk, rr, rho_spore)*1.0e3_dp
+  ! Lower-bracket index klo with z(klo) <= zq < z(klo+1); clamped to [1,nz-1].
+  ! Assumes z(:) ascending (VPCM master grid).
+  integer function col_locate(zq) result(klo)
+    real(dp), intent(in) :: zq
+    integer :: ihi, imid
+    if (zq <= z(1))  then; klo = 1;    return; end if
+    if (zq >= z(nz)) then; klo = nz-1; return; end if
+    klo = 1; ihi = nz
+    do while (ihi - klo > 1)
+      imid = (klo + ihi) / 2
+      if (zq >= z(imid)) then; klo = imid; else; ihi = imid; end if
     end do
-    write(unit,'(a)') '  (Cc->1 as r>>lambda; slip raises fall speed most for small r)'
-    write(unit,'(a)') '----------------------------------------------------------'
-  end subroutine settling_check
+  end function col_locate
+
+  ! Linear interpolation of a column field f(:) at altitude zq [m] (clamped).
+  real(dp) function col_interp(f, zq) result(val)
+    real(dp), intent(in) :: f(:), zq
+    integer  :: k
+    real(dp) :: t
+    k   = col_locate(zq)
+    t   = (zq - z(k)) / (z(k+1) - z(k))
+    t   = max(0.0_dp, min(1.0_dp, t))
+    val = f(k) + t * (f(k+1) - f(k))
+  end function col_interp
+
+  ! Local vertical gradient of Kzz [1/s] at zq (for the random-walk drift term).
+  real(dp) function dKzz_dz(zq) result(dk)
+    real(dp), intent(in) :: zq
+    integer :: k
+    k  = col_locate(zq)
+    dk = (Kzz(k+1) - Kzz(k)) / (z(k+1) - z(k))
+  end function dKzz_dz
 
   !====================================================================
   subroutine cloud_cleanup()
@@ -910,67 +918,3 @@ contains
   end subroutine cloud_cleanup
 
 end module bio_cloud_model
-
-
-!======================================================================
-! Temporary test driver.  Reads optional bio_cloud.nml for source choices:
-!   &cloud_run  indir='../inputs'  src_mode1=1 src_mode2=1 src_mode3=0 /
-!   (source ids: 0 off, 1 vpcm, 2 haus, 3 kh80)
-! Default: VPCM modes 1&2, mode 3 off.
-!======================================================================
-program bio_cloud_test
-  use bio_cloud_model
-  implicit none
-  character(len=256) :: indir, logfile, nmlfile
-  integer :: ulog, istat
-  integer :: src_mode1, src_mode2, src_mode3
-  real(8) :: phi
-  namelist /cloud_run/ indir, src_mode1, src_mode2, src_mode3, phi
-
-  indir   = '../inputs'
-  logfile = 'cloud_read.log'
-  src_mode1 = SRC_VPCM
-  src_mode2 = SRC_VPCM
-  src_mode3 = SRC_OFF
-  phi       = PHI_PACK_DEFAULT
-
-  nmlfile = 'bio_cloud.nml'
-  if (command_argument_count() >= 1) call get_command_argument(1, nmlfile)
-  open(newunit=ulog, file=trim(nmlfile), status='old', iostat=istat)
-  if (istat == 0) then
-    read(ulog, nml=cloud_run, iostat=istat)
-    close(ulog)
-    if (istat /= 0) write(*,'(a)') 'Warning: error reading bio_cloud.nml; using defaults.'
-  end if
-
-  write(*,'(a)') '============================================'
-  write(*,'(a)') ' Venus cloud model — input reader (step 1)'
-  write(*,'(a)') '============================================'
-  write(*,'(a)') ' input dir : '//trim(indir)
-  write(*,'(a,3(1x,a))') ' sources   : mode1=', src_name(src_mode1), &
-       ' mode2='//src_name(src_mode2), ' mode3='//src_name(src_mode3)
-
-  call cloud_read(trim(indir))
-  call set_source(1, src_mode1)
-  call set_source(2, src_mode2)
-  call set_source(3, src_mode3)
-  call cloud_assemble(trim(indir))
-  call cloud_build_spectrum()
-  call set_phi(phi)
-
-  open(newunit=ulog, file=trim(logfile), status='replace', action='write')
-  call cloud_diagnostics(ulog)
-  call cloud_summary(ulog)
-  call cloud_spectrum_check(ulog)
-  call host_capacity_sweep(ulog)
-  call settling_check(ulog)
-  close(ulog)
-
-  call cloud_summary(6)
-  call cloud_spectrum_check(6)
-  call host_capacity_sweep(6)
-  call settling_check(6)
-  write(*,'(a)') ' Done.  Full per-level table in '//trim(logfile)//'.'
-
-  call cloud_cleanup()
-end program bio_cloud_test
