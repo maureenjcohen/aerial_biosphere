@@ -16,11 +16,12 @@ program bio_venus_driver
   integer :: ulog, istat
   integer :: src_mode1, src_mode2, src_mode3
   real(8) :: phi
-  logical :: do_transport
+  logical :: do_transport, do_lifecycle
   integer :: n_spore, nsteps, nout
-  real(8) :: rcell_um, dt_s
+  real(8) :: rcell_um, dt_s, Ydays, seed_lo_km, seed_hi_km
   namelist /cloud_run/ indir, src_mode1, src_mode2, src_mode3, phi, &
-       do_transport, n_spore, rcell_um, dt_s, nsteps, nout
+       do_transport, do_lifecycle, n_spore, rcell_um, dt_s, nsteps, nout, &
+       Ydays, seed_lo_km, seed_hi_km
 
   indir   = '../inputs'
   logfile = 'cloud_read.log'
@@ -28,12 +29,16 @@ program bio_venus_driver
   src_mode2 = SRC_VPCM
   src_mode3 = SRC_OFF
   phi       = PHI_PACK_DEFAULT
-  do_transport = .true.
+  do_transport = .false.        ! step-1 kinematics regression (off by default)
+  do_lifecycle = .true.         ! step-2 state machine
   n_spore   = 5000
   rcell_um  = 0.5d0
   dt_s      = 5000.0d0
   nsteps    = 2000
   nout      = 200
+  Ydays     = 10.0d0            ! dormancy survival time [Earth-days]
+  seed_lo_km = 33.0d0           ! seed band: the depot/haze (plan IC) by default
+  seed_hi_km = 48.0d0
 
   nmlfile = 'bio_cloud.nml'
   if (command_argument_count() >= 1) call get_command_argument(1, nmlfile)
@@ -58,6 +63,7 @@ program bio_venus_driver
   call cloud_assemble(trim(indir))
   call cloud_build_spectrum()
   call set_phi(phi)
+  call bio_init()
 
   open(newunit=ulog, file=trim(logfile), status='replace', action='write')
   call cloud_diagnostics(ulog)
@@ -66,6 +72,8 @@ program bio_venus_driver
   call host_capacity_sweep(ulog)
   call settling_check(ulog)
   if (do_transport) call transport_test(ulog, n_spore, rcell_um*1.0d-6, dt_s, nsteps, nout)
+  if (do_lifecycle) call lifecycle_test(ulog, n_spore, rcell_um*1.0d-6, dt_s, nsteps, nout, &
+       Ydays, seed_lo_km*1.0d3, seed_hi_km*1.0d3)
   close(ulog)
 
   call cloud_summary(6)
@@ -73,6 +81,8 @@ program bio_venus_driver
   call host_capacity_sweep(6)
   call settling_check(6)
   if (do_transport) call transport_test(6, n_spore, rcell_um*1.0d-6, dt_s, nsteps, nout)
+  if (do_lifecycle) call lifecycle_test(6, n_spore, rcell_um*1.0d-6, dt_s, nsteps, nout, &
+       Ydays, seed_lo_km*1.0d3, seed_hi_km*1.0d3)
   write(*,'(a)') ' Done.  Full per-level table in '//trim(logfile)//'.'
 
   call bio_cleanup()

@@ -128,7 +128,7 @@ module bio_cloud_model
   public :: set_phi
   public :: host_capacity, host_supply, draw_host, host_capacity_sweep
   public :: viscosity_co2, mean_free_path, cunningham
-  public :: settling_velocity, settling_velocity_z, col_interp, dKzz_dz
+  public :: settling_velocity, settling_velocity_z, col_interp, col_level, dKzz_dz
   public :: nz, z, T, P, rho_air, w, Kzz, WSA, rho_host
   public :: Nm, rm, sm, validm, distm, srcm
   public :: r_bin, r_edge, specm, spec
@@ -871,6 +871,15 @@ contains
       if (zq >= z(imid)) then; klo = imid; else; ihi = imid; end if
     end do
   end function col_locate
+
+  ! Nearest grid-level index (1..nz) to altitude zq [m] — for routines that
+  ! need a discrete level (e.g. draw_host queries spec(:,k)).
+  integer function col_level(zq) result(k)
+    real(dp), intent(in) :: zq
+    integer :: klo
+    klo = col_locate(zq)
+    if (abs(zq - z(klo)) <= abs(z(klo+1) - zq)) then; k = klo; else; k = klo+1; end if
+  end function col_level
 
   ! Linear interpolation of a column field f(:) at altitude zq [m] (clamped).
   real(dp) function col_interp(f, zq) result(val)
