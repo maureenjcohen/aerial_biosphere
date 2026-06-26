@@ -89,6 +89,22 @@ module bio_cloud_model
   real(dp), parameter, public :: PHI_PACK_DEFAULT = 0.6_dp
   real(dp), save,      public :: phi_pack = PHI_PACK_DEFAULT
 
+  ! ---- Settling physics (matched to VPCM cloudvenus/new_cloud_sedim.F) ----
+  ! Stokes drag with Cunningham slip:
+  !   v_settle = (2/9)*(rho_p - rho_air)*g*r^2/mu * Cc(r)
+  !   Cc = 1 + (lambda/r)*[A + B*exp(-C*r/lambda)]   (A,B,C = 1.246,0.42,0.87)
+  ! At um sizes in thin Venus air Kn ~ O(1), so slip (Cc>1) is non-negligible;
+  ! pure Stokes overestimates drag and underestimates the fall speed.
+  real(dp), parameter, public :: PI         = 3.141592653589793_dp
+  real(dp), parameter, public :: GRAV_VENUS = 8.87_dp          ! g [m/s^2] (VPCM RG)
+  real(dp), parameter :: R_UNIV     = 8.314462618_dp           ! universal gas const [J/mol/K]
+  real(dp), parameter :: N_AVO      = 6.02214076e23_dp         ! Avogadro [1/mol]
+  real(dp), parameter :: CO2_MOLRAD = 2.2e-10_dp               ! CO2 molecular radius [m] (VPCM)
+  real(dp), parameter :: SLIP_A = 1.246_dp, SLIP_B = 0.42_dp, SLIP_C = 0.87_dp
+  ! Fixed desiccated-spore density [kg/m^3] (a knob; plan section 6).
+  real(dp), parameter, public :: RHO_SPORE_DEFAULT = 1200.0_dp
+  real(dp), save,      public :: rho_spore = RHO_SPORE_DEFAULT
+
   ! ---- Haus et al. 2016 standard-model analytic parameters (per mode) ----
   ! N(z): piecewise top-hat with exponential tails (Haus Table 1 + Eq. T1).
   ! Modal radius (= lognormal median r0) and sigma_g from Pollack et al. 1993.
@@ -103,8 +119,9 @@ module bio_cloud_model
   public :: cloud_read, cloud_assemble, cloud_build_spectrum
   public :: cloud_diagnostics, cloud_summary, cloud_spectrum_check, cloud_cleanup
   public :: src_name, set_source
-  public :: set_phi
+  public :: set_phi, set_rho_spore
   public :: host_capacity, host_supply, draw_host, host_capacity_sweep
+  public :: viscosity_co2, mean_free_path, cunningham, settling_velocity, settling_check
   public :: nz, z, T, P, rho_air, w, Kzz, WSA, rho_host
   public :: Nm, rm, sm, validm, distm, srcm
   public :: r_bin, r_edge, specm, spec
@@ -766,6 +783,107 @@ contains
   end subroutine host_capacity_sweep
 
   !====================================================================
+  ! Settling physics — Stokes drag + Cunningham slip
+  !   Terminal fall speed of a single sphere, matched to the per-particle
+  !   physics of VPCM cloudvenus/new_cloud_sedim.F (so the 1-D model and a
+  !   future 3-D coupling use the same drag law).  Pure functions of the
+  !   static column.
+  !====================================================================
+
+  subroutine set_rho_spore(val)
+    real(dp), intent(in) :: val
+    if (val > 0.0_dp) rho_spore = val
+  end subroutine set_rho_spore
+
+  ! Dynamic viscosity of CO2 [Pa.s], Johnston & Grilly (1942) via Jones/
+  ! Lennard-Jones (VPCM VISCOSITY_CO2; valid ~80-300 K).
+  real(dp) function viscosity_co2(temp) result(mu)
+    real(dp), intent(in) :: temp
+    real(dp) :: numer, denom
+    numer = 200.0_dp**(2.27_dp/4.27_dp) - 0.435_dp
+    denom = temp **(2.27_dp/4.27_dp) - 0.435_dp
+    mu = (numer/denom) * 1015.0_dp * (temp/200.0_dp)**1.5_dp
+    mu = mu * 1.0e-8_dp                          ! Poise*1e7 -> Pa.s
+  end function viscosity_co2
+
+  ! Gas mean free path [m] (VPCM new_cloud_sedim form):
+  !   lambda = (T/P) * 0.707 * R / (4*pi*molrad^2*N_A)   [= k_B T / (sqrt2 pi d^2 P)]
+  real(dp) function mean_free_path(temp, pres) result(lam)
+    real(dp), intent(in) :: temp, pres
+    lam = (temp/pres) * (0.707_dp * R_UNIV / (4.0_dp*PI*CO2_MOLRAD**2 * N_AVO))
+  end function mean_free_path
+
+  ! Cunningham slip correction for a sphere radius r in gas of mean free path
+  ! lambda.  Cc = 1 + Kn*(A + B*exp(-C/Kn)),  Kn = lambda/r.  >= 1.
+  real(dp) function cunningham(r, lambda) result(Cc)
+    real(dp), intent(in) :: r, lambda
+    real(dp) :: kn
+    Cc = 1.0_dp
+    if (r <= 0.0_dp) return
+    kn = lambda / r
+    Cc = 1.0_dp + kn*(SLIP_A + SLIP_B*exp(-SLIP_C/kn))
+  end function cunningham
+
+  ! Terminal settling velocity [m/s], POSITIVE DOWNWARD, of a sphere of radius
+  ! r and density rho_p at level k.  Uses the ingested VPCM gas density.
+  ! (Net vertical motion in the lifecycle is w(k) - settling_velocity(...).)
+  real(dp) function settling_velocity(k, r, rho_p) result(vset)
+    integer,  intent(in) :: k
+    real(dp), intent(in) :: r, rho_p
+    real(dp) :: mu, lam, Cc
+    vset = 0.0_dp
+    if (r <= 0.0_dp) return
+    mu  = viscosity_co2(T(k))
+    lam = mean_free_path(T(k), P(k))
+    Cc  = cunningham(r, lam)
+    vset = (2.0_dp/9.0_dp) * (rho_p - rho_air(k)) * GRAV_VENUS * r*r / mu * Cc
+  end function settling_velocity
+
+  ! Verification driver: settling vs radius at the peak-spectrum level, for a
+  ! host droplet (rho_host) and a desiccated spore (rho_spore).  Reports Kn and
+  ! the Stokes-only vs slip-corrected speeds so the slip regime is explicit.
+  subroutine settling_check(unit)
+    integer, intent(in) :: unit
+    integer,  parameter :: NR = 7
+    real(dp), parameter :: r_um(NR) = &
+         [0.1_dp, 0.2_dp, 0.5_dp, 1.0_dp, 2.0_dp, 4.0_dp, 10.0_dp]
+    real(dp) :: Npk, lam, mu, kn, Cc, vst, vsl, rr, rho_h
+    integer  :: i, k, kpk
+
+    Npk = 0.0_dp; kpk = 1
+    do k = 1, nz
+      if (sum(spec(:,k)) > Npk) then; Npk = sum(spec(:,k)); kpk = k; end if
+    end do
+    lam   = mean_free_path(T(kpk), P(kpk))
+    mu    = viscosity_co2(T(kpk))
+    rho_h = rho_host(kpk)
+    if (rho_h <= 0.0_dp) rho_h = 1900.0_dp        ! H2SO4 droplet fallback
+
+    write(unit,'(a)') ' '
+    write(unit,'(a)') '----------------------------------------------------------'
+    write(unit,'(a)') ' SETTLING  v = (2/9)(rho_p-rho_air) g r^2/mu * Cc(r)  [Stokes+slip]'
+    write(unit,'(a,f6.2,a,f7.2,a,es10.3,a)') '  z = ', z(kpk)/1000.0_dp, &
+         ' km,  T = ', T(kpk), ' K,  P = ', P(kpk), ' Pa'
+    write(unit,'(a,es10.3,a,es10.3,a,f7.4,a)') '  rho_air = ', rho_air(kpk), &
+         ' kg/m3,  mu = ', mu, ' Pa.s,  lambda = ', lam*1.0e6_dp, ' um'
+    write(unit,'(a,f6.0,a,f6.0,a)') '  rho_host = ', rho_h, &
+         ' kg/m3,  rho_spore = ', rho_spore, ' kg/m3'
+    write(unit,'(a)') '   r[um]    Kn      Cc     host: vStokes  vSlip [mm/s]   spore: vSlip [mm/s]'
+    do i = 1, NR
+      rr  = r_um(i) * 1.0e-6_dp
+      kn  = lam / rr
+      Cc  = cunningham(rr, lam)
+      vst = (2.0_dp/9.0_dp) * (rho_h - rho_air(kpk)) * GRAV_VENUS * rr*rr / mu
+      vsl = settling_velocity(kpk, rr, rho_h)
+      write(unit,'(2x,f7.2,2x,f7.3,2x,f6.2,4x,es11.3,2x,es11.3,4x,es11.3)') &
+           r_um(i), kn, Cc, vst*1.0e3_dp, vsl*1.0e3_dp, &
+           settling_velocity(kpk, rr, rho_spore)*1.0e3_dp
+    end do
+    write(unit,'(a)') '  (Cc->1 as r>>lambda; slip raises fall speed most for small r)'
+    write(unit,'(a)') '----------------------------------------------------------'
+  end subroutine settling_check
+
+  !====================================================================
   subroutine cloud_cleanup()
     if (allocated(z))        deallocate(z)
     if (allocated(T))        deallocate(T)
@@ -845,11 +963,13 @@ program bio_cloud_test
   call cloud_summary(ulog)
   call cloud_spectrum_check(ulog)
   call host_capacity_sweep(ulog)
+  call settling_check(ulog)
   close(ulog)
 
   call cloud_summary(6)
   call cloud_spectrum_check(6)
   call host_capacity_sweep(6)
+  call settling_check(6)
   write(*,'(a)') ' Done.  Full per-level table in '//trim(logfile)//'.'
 
   call cloud_cleanup()
