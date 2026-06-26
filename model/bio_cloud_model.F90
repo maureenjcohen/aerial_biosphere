@@ -82,6 +82,13 @@ module bio_cloud_model
   ! Generic minimum number density for a non-VPCM mode to count as "active".
   real(dp), parameter, public :: N_HOST_MIN = 1.0e3_dp   ! [m^-3]
 
+  ! ---- Host-capacity engine ----
+  ! A host droplet of radius r_host holds at most C = floor(phi*(r_host/r_cell)^3)
+  ! cells (volume packing).  phi is the packing fraction (~0.6 random close packing;
+  ! phi=1 reads C as available liquid volume).  Settable via the namelist.
+  real(dp), parameter, public :: PHI_PACK_DEFAULT = 0.6_dp
+  real(dp), save,      public :: phi_pack = PHI_PACK_DEFAULT
+
   ! ---- Haus et al. 2016 standard-model analytic parameters (per mode) ----
   ! N(z): piecewise top-hat with exponential tails (Haus Table 1 + Eq. T1).
   ! Modal radius (= lognormal median r0) and sigma_g from Pollack et al. 1993.
@@ -96,6 +103,8 @@ module bio_cloud_model
   public :: cloud_read, cloud_assemble, cloud_build_spectrum
   public :: cloud_diagnostics, cloud_summary, cloud_spectrum_check, cloud_cleanup
   public :: src_name, set_source
+  public :: set_phi
+  public :: host_capacity, host_supply, draw_host, host_capacity_sweep
   public :: nz, z, T, P, rho_air, w, Kzz, WSA, rho_host
   public :: Nm, rm, sm, validm, distm, srcm
   public :: r_bin, r_edge, specm, spec
@@ -620,6 +629,143 @@ contains
   end subroutine cloud_spectrum_check
 
   !====================================================================
+  ! Host-capacity engine
+  !   Given a cell radius r_cell, query the reconstructed host spectrum
+  !   spec(:,k) for droplets large enough to host it (r_host >= r_cell),
+  !   draw one weighted by local abundance, and report packing capacity
+  !   C = floor(phi*(r_host/r_cell)^3).  Pure queries on the static cloud;
+  !   no time integration here.
+  !====================================================================
+
+  subroutine set_phi(val)
+    real(dp), intent(in) :: val
+    if (val > 0.0_dp) phi_pack = val
+  end subroutine set_phi
+
+  ! Volume-packing capacity of a host droplet for a given cell radius.
+  ! floor() via int() (operand is positive); 0 if the cell does not fit.
+  integer function host_capacity(r_host, r_cell) result(C)
+    real(dp), intent(in) :: r_host, r_cell
+    C = 0
+    if (r_cell <= 0.0_dp .or. r_host < r_cell) return
+    C = int(phi_pack * (r_host / r_cell)**3)
+  end function host_capacity
+
+  ! Total number density [m^-3] of eligible hosts (r_host >= r_cell) at level k.
+  real(dp) function host_supply(k, r_cell) result(s)
+    integer,  intent(in) :: k
+    real(dp), intent(in) :: r_cell
+    integer :: i
+    s = 0.0_dp
+    do i = 1, NBIN
+      if (r_bin(i) >= r_cell) s = s + spec(i,k)
+    end do
+  end function host_supply
+
+  ! Draw one host bin for a germinating cell at level k, weighted by abundance
+  ! over the eligible (r_host >= r_cell) part of the spectrum.  Returns the bin
+  ! centre radius r_host, its packing capacity, and a found flag.
+  subroutine draw_host(k, r_cell, r_host, capac, found)
+    integer,  intent(in)  :: k
+    real(dp), intent(in)  :: r_cell
+    real(dp), intent(out) :: r_host
+    integer,  intent(out) :: capac
+    logical,  intent(out) :: found
+    real(dp) :: tot, u, cum
+    integer  :: i, ilast
+
+    found = .false.; r_host = 0.0_dp; capac = 0
+    tot = 0.0_dp; ilast = 0
+    do i = 1, NBIN
+      if (r_bin(i) >= r_cell) then
+        tot = tot + spec(i,k)
+        if (spec(i,k) > 0.0_dp) ilast = i
+      end if
+    end do
+    if (tot <= 0.0_dp) return
+
+    call random_number(u)
+    u = u * tot
+    cum = 0.0_dp
+    do i = 1, NBIN
+      if (r_bin(i) >= r_cell) then
+        cum = cum + spec(i,k)
+        if (u <= cum .and. spec(i,k) > 0.0_dp) then
+          r_host = r_bin(i)
+          capac  = host_capacity(r_host, r_cell)
+          found  = .true.
+          return
+        end if
+      end if
+    end do
+    ! Floating-point fallback: u landed just past the running sum -> last bin.
+    r_host = r_bin(ilast)
+    capac  = host_capacity(r_host, r_cell)
+    found  = .true.
+  end subroutine draw_host
+
+  ! Verification driver: sweep r_cell at the peak-spectrum level and report
+  ! eligible host supply, abundance-weighted <r_host>, mean and max capacity.
+  ! A Monte-Carlo check confirms draw_host reproduces the analytic weighting.
+  subroutine host_capacity_sweep(unit)
+    integer, intent(in) :: unit
+    integer,  parameter :: NRC = 7, NDRAW = 200000
+    real(dp), parameter :: rc_um(NRC) = &
+         [0.2_dp, 0.3_dp, 0.5_dp, 1.0_dp, 2.0_dp, 3.0_dp, 4.0_dp]
+    ! maxC ignores the negligible renormalised-lognormal tail bins (same
+    ! abundance floor as the spectrum dump): only count bins with real droplets.
+    real(dp), parameter :: SPEC_FLOOR = 1.0e-2_dp   ! [m^-3]
+    real(dp) :: Npk, supply, wmean_r, meanC, rc, contrib, mc_r, dmc
+    integer  :: i, k, kpk, j, maxC, capj, ndr
+    real(dp) :: rh
+    logical  :: ok
+
+    ! Peak total-spectrum level (same convention as cloud_spectrum_check).
+    Npk = 0.0_dp; kpk = 1
+    do k = 1, nz
+      if (sum(spec(:,k)) > Npk) then; Npk = sum(spec(:,k)); kpk = k; end if
+    end do
+
+    write(unit,'(a)') ' '
+    write(unit,'(a)') '----------------------------------------------------------'
+    write(unit,'(a)') ' HOST-CAPACITY ENGINE  C(r_cell) = floor(phi*(r_host/r_cell)^3)'
+    write(unit,'(a,f4.2,a,f6.2,a)') '  phi = ', phi_pack, &
+         ';  peak-spectrum level z = ', z(kpk)/1000.0_dp, ' km'
+    write(unit,'(a)') '  r_cell[um]  supply[m-3]   <r_host>[um]  meanC   maxC    MC<r_host>  dMC'
+    do i = 1, NRC
+      rc = rc_um(i) * 1.0e-6_dp
+      supply  = host_supply(kpk, rc)
+      if (supply <= 0.0_dp) then
+        write(unit,'(2x,f8.2,4x,a)') rc_um(i), 'no eligible host'
+        cycle
+      end if
+      ! Analytic abundance-weighted mean radius and mean capacity over bins.
+      wmean_r = 0.0_dp; meanC = 0.0_dp; maxC = 0
+      do j = 1, NBIN
+        if (r_bin(j) >= rc .and. spec(j,kpk) > 0.0_dp) then
+          contrib = spec(j,kpk) / supply
+          wmean_r = wmean_r + contrib * r_bin(j)
+          capj    = host_capacity(r_bin(j), rc)
+          meanC   = meanC + contrib * real(capj, dp)
+          if (spec(j,kpk) > SPEC_FLOOR) maxC = max(maxC, capj)
+        end if
+      end do
+      ! Monte-Carlo consistency check on the sampler.
+      mc_r = 0.0_dp; ndr = 0
+      do j = 1, NDRAW
+        call draw_host(kpk, rc, rh, capj, ok)
+        if (ok) then; mc_r = mc_r + rh; ndr = ndr + 1; end if
+      end do
+      if (ndr > 0) mc_r = mc_r / real(ndr, dp)
+      dmc = mc_r / wmean_r - 1.0_dp
+      write(unit,'(2x,f8.2,2x,es12.4,2x,f9.4,2x,f8.2,2x,i6,4x,f9.4,2x,es9.2)') &
+           rc_um(i), supply, wmean_r*1.0e6_dp, meanC, maxC, mc_r*1.0e6_dp, dmc
+    end do
+    write(unit,'(a)') '  (meanC,maxC near 0-1 => capacity-starved; >>1 => colonies form)'
+    write(unit,'(a)') '----------------------------------------------------------'
+  end subroutine host_capacity_sweep
+
+  !====================================================================
   subroutine cloud_cleanup()
     if (allocated(z))        deallocate(z)
     if (allocated(T))        deallocate(T)
@@ -660,13 +806,15 @@ program bio_cloud_test
   character(len=256) :: indir, logfile, nmlfile
   integer :: ulog, istat
   integer :: src_mode1, src_mode2, src_mode3
-  namelist /cloud_run/ indir, src_mode1, src_mode2, src_mode3
+  real(8) :: phi
+  namelist /cloud_run/ indir, src_mode1, src_mode2, src_mode3, phi
 
   indir   = '../inputs'
   logfile = 'cloud_read.log'
   src_mode1 = SRC_VPCM
   src_mode2 = SRC_VPCM
   src_mode3 = SRC_OFF
+  phi       = PHI_PACK_DEFAULT
 
   nmlfile = 'bio_cloud.nml'
   if (command_argument_count() >= 1) call get_command_argument(1, nmlfile)
@@ -690,15 +838,18 @@ program bio_cloud_test
   call set_source(3, src_mode3)
   call cloud_assemble(trim(indir))
   call cloud_build_spectrum()
+  call set_phi(phi)
 
   open(newunit=ulog, file=trim(logfile), status='replace', action='write')
   call cloud_diagnostics(ulog)
   call cloud_summary(ulog)
   call cloud_spectrum_check(ulog)
+  call host_capacity_sweep(ulog)
   close(ulog)
 
   call cloud_summary(6)
   call cloud_spectrum_check(6)
+  call host_capacity_sweep(6)
   write(*,'(a)') ' Done.  Full per-level table in '//trim(logfile)//'.'
 
   call cloud_cleanup()
