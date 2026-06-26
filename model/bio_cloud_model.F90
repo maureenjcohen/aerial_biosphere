@@ -578,7 +578,15 @@ contains
         if (.not. validm(k,m)) cycle
         nrec = sum(specm(:,k,m))
         if (nrec <= 0.0_dp) cycle
-        rg   = exp(sum(specm(:,k,m) * log(r_bin)) / nrec)  ! recovered mean (geom) radius
+        ! Recover the radius using each mode's own central statistic, so the
+        ! comparison to the input rm is apples-to-apples: geometric mean for
+        ! lognormal modes (= input median r0), arithmetic mean for Gaussian
+        ! modes (= input mean radius).
+        if (distm(m) == DIST_GAUSSIAN) then
+          rg = sum(specm(:,k,m) * r_bin) / nrec          ! recovered arithmetic mean radius
+        else
+          rg = exp(sum(specm(:,k,m) * log(r_bin)) / nrec)! recovered geometric mean radius
+        end if
         errN = nrec / Nm(k,m) - 1.0_dp
         errR = rg   / rm(k,m) - 1.0_dp
         maxN = max(maxN, abs(errN))
@@ -589,7 +597,7 @@ contains
     if (maxN < 1.0e-3_dp .and. maxR < 5.0e-2_dp) then
       write(unit,'(a)') '  RECONSTRUCTION OK'
     else
-      write(unit,'(a)') '  NOTE: errR finite for Gaussian/narrow modes is expected (geom vs arith mean)'
+      write(unit,'(a)') '  NOTE: residual errR can arise from grid truncation of a wide/edge-hugging mode'
     end if
 
     ! Spectrum dump at the level of peak total spectrum.
