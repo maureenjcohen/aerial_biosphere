@@ -19,10 +19,10 @@ program bio_venus_driver
   logical :: do_transport, do_lifecycle, do_evolve
   integer :: n_spore, nsteps, nout, maxorgs
   real(8) :: rcell_um, dt_s, Ydays, seed_lo_km, seed_hi_km
-  real(8) :: Aref_m2, X0days
+  real(8) :: Aref_m2, X0days, cellhalf_days, hosthalf_days
   namelist /cloud_run/ indir, src_mode1, src_mode2, src_mode3, phi, &
        do_transport, do_lifecycle, do_evolve, n_spore, rcell_um, dt_s, nsteps, nout, &
-       Ydays, seed_lo_km, seed_hi_km, maxorgs, Aref_m2, X0days
+       Ydays, seed_lo_km, seed_hi_km, maxorgs, Aref_m2, X0days, cellhalf_days, hosthalf_days
 
   indir   = '../inputs'
   logfile = 'cloud_read.log'
@@ -44,6 +44,8 @@ program bio_venus_driver
   maxorgs   = 300000            ! organism-store capacity (births reuse slots)
   Aref_m2   = 1.0d-10           ! reference area -> population scale
   X0days    = 1.0d0             ! seed reproduction half-life [Earth-days]
+  cellhalf_days = 10.0d0        ! ACTIVE-cell baseline half-life [Earth-days]
+  hosthalf_days = 5.0d0         ! host-droplet lifetime [Earth-days]
 
   nmlfile = 'bio_cloud.nml'
   if (command_argument_count() >= 1) call get_command_argument(1, nmlfile)
@@ -71,6 +73,8 @@ program bio_venus_driver
   call bio_init()
   A_ref     = Aref_m2
   X_init_s  = X0days * 86400.0d0
+  cell_half_s = cellhalf_days * 86400.0d0
+  host_half_s = hosthalf_days * 86400.0d0
 
   open(newunit=ulog, file=trim(logfile), status='replace', action='write')
   call cloud_diagnostics(ulog)

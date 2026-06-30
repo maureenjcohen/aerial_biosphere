@@ -42,7 +42,8 @@ module bio_venus
   integer,  allocatable, save :: o_birthstep(:)    ! step created (same-step division guard)
   integer,  save              :: n_lost_top = 0, n_lost_bot = 0   ! boundary-loss tallies
   integer,  save              :: n_germ = 0, n_dead_dormant = 0   ! germinations / Y-clock deaths
-  integer,  save              :: n_birth = 0, n_eject = 0         ! divisions / overflow ejections
+  integer,  save              :: n_birth = 0, n_eject = 0         ! surviving divisions / ejected daughters (died)
+  integer,  save              :: n_dead_cell = 0, n_host_die = 0  ! ACTIVE-cell deaths / host-droplet deaths
 
   ! ---- Host registry (the colony droplets; only cell-bearing droplets exist) ----
   ! Hosts are the transported ACTIVE entity; member cells sync to h_z and read
@@ -78,6 +79,13 @@ module bio_venus
   real(dp), save, public :: r_max      = 2.0e-5_dp    ! cap to keep r_cell on the grid [m]
   real(dp), save, public :: X_min_s    = 3600.0_dp    ! min reproduction half-life [s]
   real(dp), save, public :: X_max_s    = 8.64e6_dp    ! max reproduction half-life [s] (100 days)
+  ! ---- Mortality / turnover (closes the Seager cycle) ----
+  ! cell_half_s: baseline ACTIVE-cell half-life (Yates-style); death frees a colony
+  ! slot -> turnover keeps fission (and so evolution) running at capacity.
+  ! host_half_s: host-droplet lifetime; on host death its cells DESICCATE back to
+  ! DORMANT spores -> replenishes the seed bank (active -> spore -> germinate loop).
+  real(dp), save, public :: cell_half_s = 8.64e5_dp   ! ACTIVE-cell half-life [s] (10 days)
+  real(dp), save, public :: host_half_s = 4.32e5_dp   ! host-droplet lifetime [s] (5 days)
   integer,  save              :: this_step = 0
   ! Amortized free-lists for O(1) slot reuse (rebuilt by one scan when drained).
   integer,  allocatable, save :: org_free(:),  host_free(:)
@@ -142,7 +150,8 @@ contains
     o_state = ST_DEAD; o_z = 0.0_dp; o_rcell = 0.0_dp; o_age = 0.0_dp
     o_rhost = 0.0_dp; o_capac = 0; o_X = X_init_s; o_host = 0; o_birthstep = 0
     n_orgs = 0; n_lost_top = 0; n_lost_bot = 0; n_germ = 0; n_dead_dormant = 0
-    n_birth = 0; n_eject = 0; org_free_n = 0; org_free_ptr = 1
+    n_birth = 0; n_eject = 0; n_dead_cell = 0; n_host_die = 0
+    org_free_n = 0; org_free_ptr = 1
   end subroutine org_alloc
 
   subroutine free_orgs()
@@ -539,9 +548,10 @@ contains
     out = max(vmin, min(vmax, out))
   end function mutate_log
 
-  ! One evolution step.  Passes: A transport free spores; B transport hosts &
-  ! set fate; C apply host fate to ACTIVE cells; D germination (ceiling-limited);
-  ! E fission + mutation + ejection.
+  ! One evolution step.  Passes: A transport free spores; B transport hosts, set
+  ! fate (incl. finite-lifetime droplet death -> desiccate); C apply host fate to
+  ! ACTIVE cells; C2 baseline cell mortality; D germination (ceiling-limited);
+  ! E fission + mutation (a daughter ejected from a full colony dies).
   subroutine evolve_step(dt, Y_s)
     real(dp), intent(in) :: dt, Y_s
     integer  :: i, k, h, j, nnow, capac
@@ -601,6 +611,13 @@ contains
           occ_lev(k)        = occ_lev(k) + 1
           h_lev(h)          = k
         end if
+        ! droplet finite lifetime (memoryless): evaporate -> cells desiccate to spores
+        p = 1.0_dp - exp(-dt * log(2.0_dp) / host_half_s)
+        call random_number(u)
+        if (u < p) then
+          h_fate(h) = HF_DESICCATE; occ_lev(h_lev(h)) = occ_lev(h_lev(h)) - 1
+          n_host_die = n_host_die + 1
+        end if
       end if
     end do
 
@@ -625,6 +642,24 @@ contains
       h_fate(h) = HF_ALIVE
     end do
 
+    ! ---- C2: baseline ACTIVE-cell mortality (memoryless half-life) ----
+    ! Frees a colony slot; when a colony loses its last cell the droplet reverts to
+    ! an empty cloud particle and its level slot returns to the available pool.
+    do i = 1, n_orgs
+      if (o_state(i) /= ST_ACTIVE) cycle
+      if (o_birthstep(i) >= this_step) cycle   ! germinated/born this step
+      p = 1.0_dp - exp(-dt * log(2.0_dp) / cell_half_s)
+      call random_number(u)
+      if (u >= p) cycle
+      h = o_host(i)
+      o_state(i) = ST_DEAD; n_dead_cell = n_dead_cell + 1
+      if (h > 0) then
+        h_occ(h) = h_occ(h) - 1
+        if (h_occ(h) == 0) occ_lev(h_lev(h)) = occ_lev(h_lev(h)) - 1
+      end if
+      o_host(i) = 0; o_rhost(i) = 0.0_dp; o_capac(i) = 0
+    end do
+
     ! ---- D: germination (DORMANT -> ACTIVE), ceiling-limited ----
     do i = 1, n_orgs
       if (o_state(i) /= ST_DORMANT) cycle
@@ -632,7 +667,7 @@ contains
       if (zq < z_depot_hi) cycle               ! haze: becomes depot next step
       if (.not. liquid_here(zq)) cycle
       k = col_level(zq)
-      if (real(occ_lev(k), dp) >= avail_lev(k)) cycle    ! droplets full here
+      if (real(occ_lev(k)+1, dp) > avail_lev(k)) cycle   ! no whole host droplet available here
       call draw_host(k, o_rcell(i), r_host, capac, found)
       if (.not. found) cycle
       j = new_host_slot()
@@ -645,7 +680,11 @@ contains
       n_germ = n_germ + 1
     end do
 
-    ! ---- E: fission + mutation + ejection ----
+    ! ---- E: fission + mutation; a daughter ejected from a full colony DIES ----
+    ! A division's surplus daughter is a bare cell, not a spore: expelled from the
+    ! host droplet it has no coat and dies (it is simply not instantiated). So a
+    ! full colony stops growing and the population is bounded by host capacity,
+    ! with no ejected-spore contribution to the dormant pool.
     nnow = n_orgs
     do i = 1, nnow
       if (o_state(i) /= ST_ACTIVE) cycle
@@ -654,22 +693,20 @@ contains
       call random_number(u)
       if (u >= p) cycle
       h = o_host(i)
+      if (h_occ(h) >= h_capac(h)) then         ! colony full -> daughter ejected, dies
+        n_eject = n_eject + 1
+        cycle
+      end if
       j = new_org_slot()
       if (j == 0) cycle                        ! store full -> drop birth
       o_rcell(j)     = mutate_log(o_rcell(i), mut_sigma_r, r_min, r_max)
       o_X(j)         = mutate_log(o_X(i),     mut_sigma_X, X_min_s, X_max_s)
       o_age(j)       = 0.0_dp
       o_birthstep(j) = this_step
-      if (h_occ(h) < h_capac(h)) then          ! room in the colony
-        o_state(j) = ST_ACTIVE; o_host(j) = h; o_z(j) = h_z(h)
-        o_rhost(j) = h_rhost(h); o_capac(j) = h_capac(h)
-        h_occ(h)   = h_occ(h) + 1
-        n_birth    = n_birth + 1
-      else                                     ! colony full -> eject daughter as spore
-        o_state(j) = ST_DORMANT; o_host(j) = 0; o_z(j) = h_z(h)
-        o_rhost(j) = 0.0_dp; o_capac(j) = 0
-        n_birth    = n_birth + 1; n_eject = n_eject + 1
-      end if
+      o_state(j) = ST_ACTIVE; o_host(j) = h; o_z(j) = h_z(h)
+      o_rhost(j) = h_rhost(h); o_capac(j) = h_capac(h)
+      h_occ(h)   = h_occ(h) + 1
+      n_birth    = n_birth + 1
     end do
   end subroutine evolve_step
 
@@ -720,7 +757,7 @@ contains
 
     write(unit,'(a)') ' '
     write(unit,'(a)') '----------------------------------------------------------'
-    write(unit,'(a)') ' EVOLVE TEST (step 3: fission + mutation + carrying-capacity ceiling)'
+    write(unit,'(a)') ' EVOLVE TEST (step 3: fission + mutation + carrying capacity + turnover)'
     write(unit,'(a,i0,a,f6.3,a,i0)') '  ', nseed, ' seed spores, r_cell0 = ', &
          rcell0*1.0e6_dp, ' um;  max_orgs = ', maxorgs
     write(unit,'(a,es9.2,a,es10.3,a)') '  A_ref = ', A_ref, &
@@ -729,6 +766,8 @@ contains
          zhi/1000.0_dp, ' km;  Y = ', Ydays, ' d;  X0 = ', X_init_s/86400.0_dp, ' d'
     write(unit,'(a,es9.2,a,i0,a,f7.1,a)') '  dt = ', dt, ' s x ', nsteps, &
          ' = ', dt*real(nsteps,dp)/86400.0_dp, ' Earth-days'
+    write(unit,'(a,f5.1,a,f5.1,a)') '  cell half-life = ', cell_half_s/86400.0_dp, &
+         ' d;  host lifetime = ', host_half_s/86400.0_dp, ' d'
     write(unit,'(a)') '   t[day]  nACT  nDOR   nDEP  hosts colo maxC  <r>um  <X>d  <z>km   births  eject'
     do step = 0, nsteps
       if (mod(step, nout) == 0 .or. step == nsteps) then
@@ -739,6 +778,8 @@ contains
       end if
       if (step < nsteps) call evolve_step(dt, Y_s)
     end do
+    write(unit,'(a,i0,a,i0,a,i0)') '  cumulative: germinations = ', n_germ, &
+         ',  cell deaths = ', n_dead_cell, ',  host deaths = ', n_host_die
     write(unit,'(a)') '----------------------------------------------------------'
   end subroutine evolve_test
 
