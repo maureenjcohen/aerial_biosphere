@@ -24,6 +24,11 @@ module bio_venus
   ! ---- Fixed desiccated-spore density [kg/m^3] (a knob; plan section 6) ----
   real(dp), parameter, public :: RHO_SPORE_DEFAULT = 1200.0_dp
   real(dp), save,      public :: rho_spore = RHO_SPORE_DEFAULT
+  ! ---- Hydrated (in-droplet, actively-dividing) cell density [kg/m^3] ----
+  ! Distinct from the DESICCATED spore density above: a live cell bathed in liquid
+  ! is near water (~1000-1100).  Used only for the combined-droplet settling
+  ! verdict in the depot return-leg test (rho_spore governs free-spore settling).
+  real(dp), save, public :: rho_cell_wet = 1050.0_dp
 
   ! ---- Organism store (structure-of-arrays) + 3-state machine ----
   ! State machine per plan section 2.2.  Step-1 transport uses DEAD/DORMANT
@@ -44,11 +49,20 @@ module bio_venus
   integer,  save              :: n_germ = 0, n_dead_dormant = 0   ! germinations / Y-clock deaths
   integer,  save              :: n_birth = 0, n_eject = 0         ! surviving divisions / ejected daughters (died)
   integer,  save              :: n_dead_cell = 0, n_host_die = 0  ! ACTIVE-cell deaths / host-droplet deaths
+  ! Depot return-leg test: colony deaths whose host droplet was heavy enough to
+  ! sediment to the depot (rain-out, cells -> DEPOT) vs desiccated in place (cells
+  ! -> DORMANT in cloud), and cells delivered to the depot bank.
+  integer,  save              :: n_rainout = 0, n_desicc_place = 0, n_cells_depot = 0
+  real(dp), save              :: rmin_settle = 0.0_dp   ! smallest host r that reached depot [m]
+  real(dp), save              :: rmax_fail   = 0.0_dp   ! largest host r that failed [m] (threshold sits between)
+  real(dp), save              :: sum_rho_rain = 0.0_dp  ! Sum of combined density rho_eff over rain-out
+                                                        ! colonies -> measured mean = sum/n_rainout
 
   ! ---- Host registry (the colony droplets; only cell-bearing droplets exist) ----
   ! Hosts are the transported ACTIVE entity; member cells sync to h_z and read
   ! h_fate, so destruction needs no per-host membership lists.
   integer, parameter :: HF_ALIVE = 0, HF_DESICCATE = 1, HF_DEAD_BOT = 2, HF_DEAD_TOP = 3
+  integer, parameter :: HF_RAINOUT = 4   ! colony heavy enough to sediment to depot -> cells DEPOT
   integer,  save              :: max_hosts = 0, n_hosts = 0
   real(dp), allocatable, save :: h_rhost(:)        ! droplet radius [m]
   integer,  allocatable, save :: h_capac(:)        ! packing capacity C
@@ -87,6 +101,13 @@ module bio_venus
   real(dp), save, public :: cell_half_s = 8.64e5_dp   ! ACTIVE-cell half-life [s] (10 days)
   real(dp), save, public :: host_half_s = 4.32e5_dp   ! host-droplet lifetime [s] (5 days)
   integer,  save              :: this_step = 0
+
+  ! ---- Trait-distribution diagnostic (optional) ----
+  ! When on, evolve_test writes per-snapshot histograms of the two heritable
+  ! traits (cell radius r, reproduction half-life X) over the ACTIVE population,
+  ! plus a summary CSV, so the distribution (not just the mean) can be tracked.
+  logical, save, public :: trait_dump = .false.
+  integer, parameter    :: NTBIN = 24                 ! histogram bins per trait
   ! Amortized free-lists for O(1) slot reuse (rebuilt by one scan when drained).
   integer,  allocatable, save :: org_free(:),  host_free(:)
   integer,  save              :: org_free_n  = 0, org_free_ptr  = 1
@@ -98,7 +119,7 @@ module bio_venus
   real(dp), save, public :: z_depot_hi     = 48.0e3_dp   ! depot/haze band top = cloud base
   real(dp), save, public :: z_domain_top   = 85.0e3_dp   ! above cloud top -> lost (DEAD)
 
-  public :: set_rho_spore
+  public :: set_rho_spore, set_rng_seed
   public :: bio_init, seed_spores, transport_step, transport_test, bio_cleanup
   public :: lifecycle_step, lifecycle_test, settling_check
   public :: step3_init, evolve_step, evolve_test
@@ -109,6 +130,20 @@ contains
     real(dp), intent(in) :: val
     if (val > 0.0_dp) rho_spore = val
   end subroutine set_rho_spore
+
+  ! Seed the intrinsic RNG deterministically from a single integer, so ensemble
+  ! members (different iseed) are independent yet each run is reproducible.
+  subroutine set_rng_seed(iseed)
+    integer, intent(in) :: iseed
+    integer :: n, i
+    integer, allocatable :: s(:)
+    call random_seed(size=n)
+    allocate(s(n))
+    do i = 1, n
+      s(i) = iseed * 1009 + i * 2718 + 12345
+    end do
+    call random_seed(put=s)
+  end subroutine set_rng_seed
 
   ! Box-Muller standard normal variate.
   subroutine normal_rand(g)
@@ -151,6 +186,8 @@ contains
     o_rhost = 0.0_dp; o_capac = 0; o_X = X_init_s; o_host = 0; o_birthstep = 0
     n_orgs = 0; n_lost_top = 0; n_lost_bot = 0; n_germ = 0; n_dead_dormant = 0
     n_birth = 0; n_eject = 0; n_dead_cell = 0; n_host_die = 0
+    n_rainout = 0; n_desicc_place = 0; n_cells_depot = 0
+    rmin_settle = 0.0_dp; rmax_fail = 0.0_dp; sum_rho_rain = 0.0_dp
     org_free_n = 0; org_free_ptr = 1
   end subroutine org_alloc
 
@@ -548,6 +585,52 @@ contains
     out = max(vmin, min(vmax, out))
   end function mutate_log
 
+  ! Combined (cell-laden) droplet density [kg/m^3] for host h: volume-weighted mix
+  ! of hydrated cells and H2SO4 solution.  A full colony's cell volume fraction is
+  ! ~phi, so f_cells = phi * occ/capac (cells are LIGHTER than acid, so a fuller
+  ! colony is slightly less dense -> settles marginally slower).
+  real(dp) function host_density_eff(h) result(rho_eff)
+    integer, intent(in) :: h
+    real(dp) :: rho_liq, f_cells
+    rho_liq = col_interp(rho_host, h_z(h)); if (rho_liq <= 0.0_dp) rho_liq = 1900.0_dp
+    f_cells = 0.0_dp
+    if (h_capac(h) > 0) f_cells = phi_pack * real(h_occ(h), dp) / real(h_capac(h), dp)
+    rho_eff = f_cells * rho_cell_wet + (1.0_dp - f_cells) * rho_liq
+  end function host_density_eff
+
+  ! Depot return-leg feasibility: would a droplet of radius r, density rho, released
+  ! at z_from, sediment all the way to the depot top (z_depot_hi) against the
+  ! vertical wind?  True iff its settling speed beats the upward wind at EVERY level
+  ! on the path down (net-downward everywhere -> not trapped by the cloud-base
+  ! updraft).  This is the physical test of the Seager cycle's return leg.
+  logical function settles_to_depot(z_from, r, rho) result(yes)
+    real(dp), intent(in) :: z_from, r, rho
+    integer :: k, klo, khi
+    yes = .true.
+    if (z_from <= z_depot_hi) return          ! already at/below depot top
+    klo = col_level(z_depot_hi)
+    khi = col_level(z_from)
+    do k = klo, khi
+      if (settling_velocity(k, r, rho) <= w(k)) then; yes = .false.; return; end if
+    end do
+  end function settles_to_depot
+
+  ! Classify a dying colony (host h) as rain-out (heavy enough to reach the depot)
+  ! or in-place desiccation, and record the verdict + host-radius envelope.
+  integer function desiccation_fate(h) result(fate)
+    integer, intent(in) :: h
+    real(dp) :: rho
+    rho = host_density_eff(h)
+    if (settles_to_depot(h_z(h), h_rhost(h), rho)) then
+      fate = HF_RAINOUT;   n_rainout = n_rainout + 1
+      sum_rho_rain = sum_rho_rain + rho          ! measured combined density of this rained-out colony
+      if (rmin_settle == 0.0_dp) then; rmin_settle = h_rhost(h); else; rmin_settle = min(rmin_settle, h_rhost(h)); end if
+    else
+      fate = HF_DESICCATE; n_desicc_place = n_desicc_place + 1
+      rmax_fail = max(rmax_fail, h_rhost(h))
+    end if
+  end function desiccation_fate
+
   ! One evolution step.  Passes: A transport free spores; B transport hosts, set
   ! fate (incl. finite-lifetime droplet death -> desiccate); C apply host fate to
   ! ACTIVE cells; C2 baseline cell mortality; D germination (ceiling-limited);
@@ -602,7 +685,8 @@ contains
       else if (zq >= z_domain_top) then
         h_fate(h) = HF_DEAD_TOP; occ_lev(h_lev(h)) = occ_lev(h_lev(h)) - 1
       else if (.not. liquid_here(zq)) then
-        h_fate(h) = HF_DESICCATE; occ_lev(h_lev(h)) = occ_lev(h_lev(h)) - 1
+        h_z(h)    = zq                          ! desiccates where it arrived
+        h_fate(h) = desiccation_fate(h); occ_lev(h_lev(h)) = occ_lev(h_lev(h)) - 1
       else
         h_fate(h) = HF_ALIVE; h_z(h) = zq
         k = col_level(zq)
@@ -611,11 +695,12 @@ contains
           occ_lev(k)        = occ_lev(k) + 1
           h_lev(h)          = k
         end if
-        ! droplet finite lifetime (memoryless): evaporate -> cells desiccate to spores
+        ! droplet finite lifetime (memoryless): evaporate.  Return-leg test: heavy
+        ! enough to have sedimented to the depot (rain-out) or desiccate in place?
         p = 1.0_dp - exp(-dt * log(2.0_dp) / host_half_s)
         call random_number(u)
         if (u < p) then
-          h_fate(h) = HF_DESICCATE; occ_lev(h_lev(h)) = occ_lev(h_lev(h)) - 1
+          h_fate(h) = desiccation_fate(h); occ_lev(h_lev(h)) = occ_lev(h_lev(h)) - 1
           n_host_die = n_host_die + 1
         end if
       end if
@@ -631,6 +716,10 @@ contains
       case (HF_DESICCATE)
         o_state(i) = ST_DORMANT; o_z(i) = h_z(h)
         o_host(i) = 0; o_rhost(i) = 0.0_dp; o_capac(i) = 0; o_age(i) = 0.0_dp
+      case (HF_RAINOUT)                          ! sedimented to the haze depot
+        o_state(i) = ST_DEPOT; o_z(i) = 0.5_dp * (z_depot_lo + z_depot_hi)
+        o_host(i) = 0; o_rhost(i) = 0.0_dp; o_capac(i) = 0; o_age(i) = 0.0_dp
+        n_cells_depot = n_cells_depot + 1
       case (HF_DEAD_BOT)
         o_state(i) = ST_DEAD; n_lost_bot = n_lost_bot + 1; o_host(i) = 0
       case (HF_DEAD_TOP)
@@ -743,6 +832,59 @@ contains
     end if
   end subroutine evolve_stats
 
+  ! Log-spaced bin edges (NTBIN bins) spanning [lo,hi]; edges(1..NTBIN+1).
+  subroutine log_edges(lo, hi, edges)
+    real(dp), intent(in)  :: lo, hi
+    real(dp), intent(out) :: edges(NTBIN+1)
+    integer  :: i
+    real(dp) :: llo, lhi
+    llo = log(lo); lhi = log(hi)
+    do i = 0, NTBIN
+      edges(i+1) = exp(llo + (lhi - llo) * real(i, dp) / real(NTBIN, dp))
+    end do
+  end subroutine log_edges
+
+  ! Log-bin index for value v given the low/high edges (clamped to [1,NTBIN]).
+  integer function log_bin(v, lo, hi) result(b)
+    real(dp), intent(in) :: v, lo, hi
+    real(dp) :: llo, lhi
+    llo = log(lo); lhi = log(hi)
+    b = 1 + int(real(NTBIN, dp) * (log(v) - llo) / (lhi - llo))
+    if (b < 1)     b = 1
+    if (b > NTBIN) b = NTBIN
+  end function log_bin
+
+  ! One snapshot: bin the ACTIVE population's traits into r/X histograms (units
+  ! and mean/std to the summary), scaled by the mode multiplicity so a bin count
+  ! reflects the true number of cells (a full colony carries h_occ identical
+  ! members already, since each is its own org).  Writes one row per file.
+  subroutine trait_snapshot(t_day, ur, ux, us, nact, ndor, ndep)
+    real(dp), intent(in) :: t_day
+    integer,  intent(in) :: ur, ux, us, nact, ndor, ndep
+    integer  :: i, b, rc(NTBIN), xc(NTBIN)
+    real(dp) :: sr, sr2, sx, sx2, rmean, rstd, xmean, xstd, rv, xv
+    rc = 0; xc = 0; sr = 0.0_dp; sr2 = 0.0_dp; sx = 0.0_dp; sx2 = 0.0_dp
+    do i = 1, n_orgs
+      if (o_state(i) /= ST_ACTIVE) cycle
+      rv = o_rcell(i) * 1.0e6_dp                    ! um
+      xv = o_X(i) / 86400.0_dp                      ! days
+      b = log_bin(o_rcell(i), r_min, r_max); rc(b) = rc(b) + 1
+      b = log_bin(o_X(i),    X_min_s, X_max_s); xc(b) = xc(b) + 1
+      sr = sr + rv; sr2 = sr2 + rv*rv
+      sx = sx + xv; sx2 = sx2 + xv*xv
+    end do
+    if (nact > 0) then
+      rmean = sr / real(nact, dp); rstd = sqrt(max(0.0_dp, sr2/real(nact,dp) - rmean*rmean))
+      xmean = sx / real(nact, dp); xstd = sqrt(max(0.0_dp, sx2/real(nact,dp) - xmean*xmean))
+    else
+      rmean = 0.0_dp; rstd = 0.0_dp; xmean = 0.0_dp; xstd = 0.0_dp
+    end if
+    write(ur,'(f9.3,24(",",i0))') t_day, rc
+    write(ux,'(f9.3,24(",",i0))') t_day, xc
+    write(us,'(f9.3,3(",",i0),4(",",es12.5))') t_day, nact, ndor, ndep, &
+         rmean, rstd, xmean, xstd
+  end subroutine trait_snapshot
+
   ! Step-3 verification: seed spores, run fission+mutation+ceiling, report the
   ! per-state populations, colony stats and evolving mean traits over time.
   subroutine evolve_test(unit, nseed, rcell0, dt, nsteps, nout, Ydays, zlo, zhi, maxorgs)
@@ -750,10 +892,27 @@ contains
     real(dp), intent(in) :: rcell0, dt, Ydays, zlo, zhi
     integer  :: step, nact, ndor, ndep, nhost, ncol, maxocc
     real(dp) :: rmean_um, Xmean_d, zact, Y_s
+    integer  :: ur, ux, us, b
+    real(dp) :: redg(NTBIN+1), xedg(NTBIN+1)
 
     Y_s = Ydays * 86400.0_dp
     call seed_spores(nseed, rcell0, zlo, zhi, maxorgs)
     call step3_init()
+
+    if (trait_dump) then                    ! open per-snapshot trait histograms
+      call log_edges(r_min, r_max, redg)
+      call log_edges(X_min_s, X_max_s, xedg)
+      open(newunit=ur, file='traits_r.csv',       status='replace', action='write')
+      open(newunit=ux, file='traits_X.csv',       status='replace', action='write')
+      open(newunit=us, file='traits_summary.csv', status='replace', action='write')
+      write(ur,'(a)',advance='no') 't_day'      ! header = bin CENTERS (geometric), um
+      do b = 1, NTBIN; write(ur,'(",",es11.4)',advance='no') sqrt(redg(b)*redg(b+1))*1.0e6_dp; end do
+      write(ur,'(a)') ''
+      write(ux,'(a)',advance='no') 't_day'      ! header = bin CENTERS (geometric), days
+      do b = 1, NTBIN; write(ux,'(",",es11.4)',advance='no') sqrt(xedg(b)*xedg(b+1))/86400.0_dp; end do
+      write(ux,'(a)') ''
+      write(us,'(a)') 't_day,nACT,nDOR,nDEP,r_mean_um,r_std_um,X_mean_d,X_std_d'
+    end if
 
     write(unit,'(a)') ' '
     write(unit,'(a)') '----------------------------------------------------------'
@@ -775,12 +934,23 @@ contains
         write(unit,'(2x,f7.2,1x,i6,1x,i6,1x,i6,1x,i5,1x,i5,1x,i4,1x,f6.3,1x,f5.2,1x,f6.2,1x,i9,1x,i7)') &
              dt*real(step,dp)/86400.0_dp, nact, ndor, ndep, nhost, ncol, maxocc, &
              rmean_um, Xmean_d, zact, n_birth, n_eject
+        if (trait_dump) call trait_snapshot(dt*real(step,dp)/86400.0_dp, ur, ux, us, nact, ndor, ndep)
       end if
       if (step < nsteps) call evolve_step(dt, Y_s)
     end do
     write(unit,'(a,i0,a,i0,a,i0)') '  cumulative: germinations = ', n_germ, &
          ',  cell deaths = ', n_dead_cell, ',  host deaths = ', n_host_die
+    write(unit,'(a)') '  --- depot return-leg (Seager cycle) feasibility ---'
+    write(unit,'(a,i0,a,i0,a,f6.1,a)') '  colony deaths: rain-out to depot = ', n_rainout, &
+         ',  desiccate in place = ', n_desicc_place, &
+         '   (rain-out = ', 100.0_dp*real(n_rainout,dp)/real(max(n_rainout+n_desicc_place,1),dp), ' %)'
+    write(unit,'(a,i0)') '  cells delivered to depot bank = ', n_cells_depot
+    write(unit,'(a,f7.3,a,f7.3,a)') '  host-radius envelope: largest that FAILED = ', &
+         rmax_fail*1.0e6_dp, ' um;  smallest that REACHED depot = ', rmin_settle*1.0e6_dp, ' um'
+    write(unit,'(a,f8.1,a)') '  measured mean rho_eff of rained-out colonies = ', &
+         sum_rho_rain / real(max(n_rainout, 1), dp), ' kg/m3'
     write(unit,'(a)') '----------------------------------------------------------'
+    if (trait_dump) then; close(ur); close(ux); close(us); end if
   end subroutine evolve_test
 
 end module bio_venus

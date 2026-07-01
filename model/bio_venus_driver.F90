@@ -16,13 +16,15 @@ program bio_venus_driver
   integer :: ulog, istat
   integer :: src_mode1, src_mode2, src_mode3
   real(8) :: phi
-  logical :: do_transport, do_lifecycle, do_evolve
+  logical :: do_transport, do_lifecycle, do_evolve, trait_hist
   integer :: n_spore, nsteps, nout, maxorgs
   real(8) :: rcell_um, dt_s, Ydays, seed_lo_km, seed_hi_km
-  real(8) :: Aref_m2, X0days, cellhalf_days, hosthalf_days
+  real(8) :: Aref_m2, X0days, cellhalf_days, hosthalf_days, rhocell_wet
+  integer :: rng_seed
   namelist /cloud_run/ indir, src_mode1, src_mode2, src_mode3, phi, &
        do_transport, do_lifecycle, do_evolve, n_spore, rcell_um, dt_s, nsteps, nout, &
-       Ydays, seed_lo_km, seed_hi_km, maxorgs, Aref_m2, X0days, cellhalf_days, hosthalf_days
+       Ydays, seed_lo_km, seed_hi_km, maxorgs, Aref_m2, X0days, cellhalf_days, hosthalf_days, &
+       trait_hist, rhocell_wet, rng_seed
 
   indir   = '../inputs'
   logfile = 'cloud_read.log'
@@ -46,6 +48,9 @@ program bio_venus_driver
   X0days    = 1.0d0             ! seed reproduction half-life [Earth-days]
   cellhalf_days = 10.0d0        ! ACTIVE-cell baseline half-life [Earth-days]
   hosthalf_days = 5.0d0         ! host-droplet lifetime [Earth-days]
+  trait_hist    = .false.       ! dump per-snapshot ACTIVE trait histograms (traits_*.csv)
+  rhocell_wet   = 1050.0d0      ! hydrated in-droplet cell density [kg/m3] (settling verdict)
+  rng_seed      = 0             ! >0 seeds the RNG (ensemble member id); 0 = default sequence
 
   nmlfile = 'bio_cloud.nml'
   if (command_argument_count() >= 1) call get_command_argument(1, nmlfile)
@@ -75,6 +80,9 @@ program bio_venus_driver
   X_init_s  = X0days * 86400.0d0
   cell_half_s = cellhalf_days * 86400.0d0
   host_half_s = hosthalf_days * 86400.0d0
+  trait_dump  = trait_hist
+  rho_cell_wet = rhocell_wet
+  if (rng_seed > 0) call set_rng_seed(rng_seed)
 
   open(newunit=ulog, file=trim(logfile), status='replace', action='write')
   call cloud_diagnostics(ulog)
