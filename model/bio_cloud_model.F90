@@ -111,6 +111,24 @@ module bio_cloud_model
   ! (The organism store, 3-state machine, spore density and altitude bands now
   !  live in module bio_venus, which uses this environment module.)
 
+  ! ---- Convective vertical-wind parameterization (Vega balloon empirical) ----
+  ! LAYERED ON TOP of the large-scale (Hadley) w; does not replace it.  The
+  ! convective velocity at a parcel is  w_conv = conv_sigma * conv_envelope(z) * u,
+  ! where u is a per-parcel dimensionless Ornstein-Uhlenbeck (AR(1)) red-noise
+  ! state (zero mean, unit variance, correlation time conv_tau_s) advanced each
+  ! transport sub-step by conv_ar1().  Vega-1/2 (~54 km) give sigma ~ 0.6 m/s and
+  ! a ~20-min correlation time; the large-scale w is ~0.01 m/s, so convection
+  ! dominates vertical transport in the convective layer.  Off by default so the
+  ! static-wind results are reproduced exactly (do_convection=.false. => the
+  ! biology sub-steps once with no convective term).
+  logical,  save, public :: do_convection = .false.
+  real(dp), save, public :: conv_sigma  = 0.6_dp       ! convective w std [m/s] (Vega W_a, de-biased)
+  real(dp), save, public :: conv_tau_s  = 1200.0_dp    ! correlation time [s] (~20 min)
+  real(dp), save, public :: conv_z_lo   = 48.0e3_dp    ! convective layer bottom [m] (= depot top; KNOB)
+  real(dp), save, public :: conv_z_hi   = 55.0e3_dp    ! convective layer top [m]
+  real(dp), save, public :: conv_edge   = 2.0e3_dp     ! taper half-width at each edge [m]
+  integer,  save, public :: conv_nsub   = 20           ! transport sub-steps per biology step
+
   ! ---- Haus et al. 2016 standard-model analytic parameters (per mode) ----
   ! N(z): piecewise top-hat with exponential tails (Haus Table 1 + Eq. T1).
   ! Modal radius (= lognormal median r0) and sigma_g from Pollack et al. 1993.
@@ -129,6 +147,7 @@ module bio_cloud_model
   public :: host_capacity, host_supply, draw_host, host_capacity_sweep
   public :: viscosity_co2, mean_free_path, cunningham
   public :: settling_velocity, settling_velocity_z, col_interp, col_level, dKzz_dz
+  public :: conv_envelope, conv_ar1
   public :: nz, z, T, P, rho_air, w, Kzz, WSA, rho_host
   public :: Nm, rm, sm, validm, distm, srcm
   public :: r_bin, r_edge, specm, spec
@@ -899,6 +918,34 @@ contains
     k  = col_locate(zq)
     dk = (Kzz(k+1) - Kzz(k)) / (z(k+1) - z(k))
   end function dKzz_dz
+
+  ! Convective-layer amplitude envelope: 1 inside [conv_z_lo, conv_z_hi], linearly
+  ! tapering to 0 over conv_edge at each edge, 0 outside.  Confines convection to
+  ! the (near-adiabatic) convective cloud; its lower edge is the decisive knob for
+  ! whether convection can bridge the gap to the depot.
+  real(dp) function conv_envelope(zq) result(e)
+    real(dp), intent(in) :: zq
+    if (zq <= conv_z_lo - conv_edge .or. zq >= conv_z_hi + conv_edge) then
+      e = 0.0_dp
+    else if (zq < conv_z_lo) then
+      e = (zq - (conv_z_lo - conv_edge)) / conv_edge
+    else if (zq > conv_z_hi) then
+      e = ((conv_z_hi + conv_edge) - zq) / conv_edge
+    else
+      e = 1.0_dp
+    end if
+  end function conv_envelope
+
+  ! Advance a dimensionless OU / AR(1) red-noise state one sub-step of dt_sub,
+  ! given a fresh standard-normal draw g.  Stationary N(0,1) with correlation time
+  ! conv_tau_s: u' = a*u + sqrt(1-a^2)*g,  a = exp(-dt_sub/tau).  The physical
+  ! convective velocity is conv_sigma*conv_envelope(z)*u (applied by the caller).
+  real(dp) function conv_ar1(u, dt_sub, g) result(unew)
+    real(dp), intent(in) :: u, dt_sub, g
+    real(dp) :: a
+    a = exp(-dt_sub / conv_tau_s)
+    unew = a * u + sqrt(max(0.0_dp, 1.0_dp - a*a)) * g
+  end function conv_ar1
 
   !====================================================================
   subroutine cloud_cleanup()

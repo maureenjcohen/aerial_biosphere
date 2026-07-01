@@ -45,6 +45,7 @@ module bio_venus
   real(dp), allocatable, save :: o_X(:)            ! reproduction half-life [s] (heritable)
   integer,  allocatable, save :: o_host(:)         ! host registry index (0 unless ACTIVE)
   integer,  allocatable, save :: o_birthstep(:)    ! step created (same-step division guard)
+  real(dp), allocatable, save :: o_uconv(:)        ! per-parcel OU convective state [-] (free spores)
   integer,  save              :: n_lost_top = 0, n_lost_bot = 0   ! boundary-loss tallies
   integer,  save              :: n_germ = 0, n_dead_dormant = 0   ! germinations / Y-clock deaths
   integer,  save              :: n_birth = 0, n_eject = 0         ! surviving divisions / ejected daughters (died)
@@ -70,6 +71,7 @@ module bio_venus
   real(dp), allocatable, save :: h_z(:)            ! altitude [m]
   integer,  allocatable, save :: h_lev(:)          ! current grid level
   integer,  allocatable, save :: h_fate(:)         ! HF_* this step
+  real(dp), allocatable, save :: h_uconv(:)        ! per-colony OU convective state [-]
 
   ! Per-level total droplet number density [m^-3] = sum over the spectrum.
   ! "Liquid present" (a host can exist) where this exceeds N_LIQ_MIN.
@@ -181,9 +183,9 @@ contains
     call free_orgs()
     max_orgs = nmax
     allocate(o_state(nmax), o_z(nmax), o_rcell(nmax), o_age(nmax), o_rhost(nmax), &
-             o_capac(nmax), o_X(nmax), o_host(nmax), o_birthstep(nmax), org_free(nmax))
+             o_capac(nmax), o_X(nmax), o_host(nmax), o_birthstep(nmax), o_uconv(nmax), org_free(nmax))
     o_state = ST_DEAD; o_z = 0.0_dp; o_rcell = 0.0_dp; o_age = 0.0_dp
-    o_rhost = 0.0_dp; o_capac = 0; o_X = X_init_s; o_host = 0; o_birthstep = 0
+    o_rhost = 0.0_dp; o_capac = 0; o_X = X_init_s; o_host = 0; o_birthstep = 0; o_uconv = 0.0_dp
     n_orgs = 0; n_lost_top = 0; n_lost_bot = 0; n_germ = 0; n_dead_dormant = 0
     n_birth = 0; n_eject = 0; n_dead_cell = 0; n_host_die = 0
     n_rainout = 0; n_desicc_place = 0; n_cells_depot = 0
@@ -201,6 +203,7 @@ contains
     if (allocated(o_X))         deallocate(o_X)
     if (allocated(o_host))      deallocate(o_host)
     if (allocated(o_birthstep)) deallocate(o_birthstep)
+    if (allocated(o_uconv))     deallocate(o_uconv)
     if (allocated(org_free))    deallocate(org_free)
     max_orgs = 0; n_orgs = 0
   end subroutine free_orgs
@@ -213,6 +216,7 @@ contains
     if (allocated(h_z))       deallocate(h_z)
     if (allocated(h_lev))     deallocate(h_lev)
     if (allocated(h_fate))    deallocate(h_fate)
+    if (allocated(h_uconv))   deallocate(h_uconv)
     if (allocated(host_free)) deallocate(host_free)
     if (allocated(n_total))   deallocate(n_total)
     if (allocated(dz_lev))    deallocate(dz_lev)
@@ -240,6 +244,7 @@ contains
       o_rcell(i) = rcell
       o_age(i)   = 0.0_dp
       o_X(i)     = X_init_s
+      if (do_convection) call normal_rand(o_uconv(i))   ! stationary N(0,1) OU state (no RNG draw if off)
     end do
   end subroutine seed_spores
 
@@ -530,12 +535,12 @@ contains
       avail_lev(k) = n_total(k) * A_ref * dz_lev(k)
       occ_lev(k)   = 0
     end do
-    if (allocated(h_rhost))   deallocate(h_rhost, h_capac, h_occ, h_z, h_lev, h_fate)
+    if (allocated(h_rhost))   deallocate(h_rhost, h_capac, h_occ, h_z, h_lev, h_fate, h_uconv)
     if (allocated(host_free)) deallocate(host_free)
     max_hosts = max_orgs
     allocate(h_rhost(max_hosts), h_capac(max_hosts), h_occ(max_hosts), &
-             h_z(max_hosts), h_lev(max_hosts), h_fate(max_hosts), host_free(max_hosts))
-    h_rhost = 0.0_dp; h_capac = 0; h_occ = 0; h_z = 0.0_dp; h_lev = 0; h_fate = HF_ALIVE
+             h_z(max_hosts), h_lev(max_hosts), h_fate(max_hosts), h_uconv(max_hosts), host_free(max_hosts))
+    h_rhost = 0.0_dp; h_capac = 0; h_occ = 0; h_z = 0.0_dp; h_lev = 0; h_fate = HF_ALIVE; h_uconv = 0.0_dp
     n_hosts = 0; this_step = 0
     org_free_n = 0; org_free_ptr = 1; host_free_n = 0; host_free_ptr = 1
   end subroutine step3_init
@@ -589,10 +594,11 @@ contains
   ! of hydrated cells and H2SO4 solution.  A full colony's cell volume fraction is
   ! ~phi, so f_cells = phi * occ/capac (cells are LIGHTER than acid, so a fuller
   ! colony is slightly less dense -> settles marginally slower).
-  real(dp) function host_density_eff(h) result(rho_eff)
-    integer, intent(in) :: h
+  real(dp) function host_density_eff(h, zq) result(rho_eff)
+    integer,  intent(in) :: h
+    real(dp), intent(in) :: zq
     real(dp) :: rho_liq, f_cells
-    rho_liq = col_interp(rho_host, h_z(h)); if (rho_liq <= 0.0_dp) rho_liq = 1900.0_dp
+    rho_liq = col_interp(rho_host, zq); if (rho_liq <= 0.0_dp) rho_liq = 1900.0_dp
     f_cells = 0.0_dp
     if (h_capac(h) > 0) f_cells = phi_pack * real(h_occ(h), dp) / real(h_capac(h), dp)
     rho_eff = f_cells * rho_cell_wet + (1.0_dp - f_cells) * rho_liq
@@ -620,7 +626,7 @@ contains
   integer function desiccation_fate(h) result(fate)
     integer, intent(in) :: h
     real(dp) :: rho
-    rho = host_density_eff(h)
+    rho = host_density_eff(h, h_z(h))
     if (settles_to_depot(h_z(h), h_rhost(h), rho)) then
       fate = HF_RAINOUT;   n_rainout = n_rainout + 1
       sum_rho_rain = sum_rho_rain + rho          ! measured combined density of this rained-out colony
@@ -637,27 +643,35 @@ contains
   ! E fission + mutation (a daughter ejected from a full colony dies).
   subroutine evolve_step(dt, Y_s)
     real(dp), intent(in) :: dt, Y_s
-    integer  :: i, k, h, j, nnow, capac
-    real(dp) :: zq, wq, kq, vset, drift, noise, g, rho_h, r_host, p, u
-    logical  :: found, in_haze
+    integer  :: i, k, h, j, nnow, capac, s, nsub
+    real(dp) :: zq, wq, kq, vset, drift, noise, g, rho_h, r_host, p, u, dt_sub, wconv
+    logical  :: found, in_haze, dead_bot, dead_top, dried
 
     this_step = this_step + 1
+    nsub   = merge(conv_nsub, 1, do_convection)     ! sub-step transport only if convecting
+    dt_sub = dt / real(nsub, dp)
 
-    ! ---- A: DORMANT/DEPOT transport + their transitions ----
+    ! ---- A: DORMANT/DEPOT transport (sub-stepped w/ convection) + transitions ----
     do i = 1, n_orgs
       if (o_state(i) /= ST_DORMANT .and. o_state(i) /= ST_DEPOT) cycle
-      zq   = o_z(i)
-      wq   = col_interp(w, zq)
-      kq   = max(col_interp(Kzz, zq), 0.0_dp)
-      vset = settling_velocity_z(zq, o_rcell(i), rho_spore)
-      drift = (wq - vset + dKzz_dz(zq)) * dt
-      call normal_rand(g); noise = sqrt(2.0_dp * kq * dt) * g
-      zq = zq + drift + noise
-      if (zq <= z_lethal_floor) then
-        o_state(i) = ST_DEAD; n_lost_bot = n_lost_bot + 1; cycle
-      else if (zq >= z_domain_top) then
-        o_state(i) = ST_DEAD; n_lost_top = n_lost_top + 1; cycle
-      end if
+      zq = o_z(i); dead_bot = .false.; dead_top = .false.
+      do s = 1, nsub
+        wq   = col_interp(w, zq)
+        kq   = max(col_interp(Kzz, zq), 0.0_dp)
+        vset = settling_velocity_z(zq, o_rcell(i), rho_spore)
+        wconv = 0.0_dp
+        if (do_convection) then
+          call normal_rand(g); o_uconv(i) = conv_ar1(o_uconv(i), dt_sub, g)
+          wconv = conv_sigma * conv_envelope(zq) * o_uconv(i)
+        end if
+        drift = (wq - vset + dKzz_dz(zq) + wconv) * dt_sub
+        call normal_rand(g); noise = sqrt(2.0_dp * kq * dt_sub) * g
+        zq = zq + drift + noise
+        if (zq <= z_lethal_floor) then; dead_bot = .true.; exit
+        else if (zq >= z_domain_top) then; dead_top = .true.; exit; end if
+      end do
+      if (dead_bot) then; o_state(i) = ST_DEAD; n_lost_bot = n_lost_bot + 1; cycle; end if
+      if (dead_top) then; o_state(i) = ST_DEAD; n_lost_top = n_lost_top + 1; cycle; end if
       o_z(i)  = zq
       in_haze = zq < z_depot_hi
       if (o_state(i) == ST_DORMANT) then
@@ -672,21 +686,39 @@ contains
       end if
     end do
 
-    ! ---- B: host transport, fate, occ_lev bookkeeping ----
+    ! ---- B: host transport (sub-stepped w/ convection), fate, occ_lev bookkeeping ----
     do h = 1, n_hosts
       if (h_occ(h) == 0) cycle
-      zq    = h_z(h)
-      wq    = col_interp(w, zq)
-      rho_h = col_interp(rho_host, zq); if (rho_h <= 0.0_dp) rho_h = 1900.0_dp
-      vset  = settling_velocity_z(zq, h_rhost(h), rho_h)
-      zq    = zq + (wq - vset) * dt
-      if (zq <= z_lethal_floor) then
+      zq = h_z(h); dead_bot = .false.; dead_top = .false.; dried = .false.
+      do s = 1, nsub
+        wq = col_interp(w, zq)
+        if (do_convection) then
+          rho_h = host_density_eff(h, zq)             ! cell-laden droplet density
+        else
+          rho_h = col_interp(rho_host, zq); if (rho_h <= 0.0_dp) rho_h = 1900.0_dp
+        end if
+        vset = settling_velocity_z(zq, h_rhost(h), rho_h)
+        wconv = 0.0_dp
+        if (do_convection) then
+          call normal_rand(g); h_uconv(h) = conv_ar1(h_uconv(h), dt_sub, g)
+          wconv = conv_sigma * conv_envelope(zq) * h_uconv(h)
+        end if
+        zq = zq + (wq - vset + wconv) * dt_sub
+        if (zq <= z_lethal_floor) then; dead_bot = .true.; exit
+        else if (zq >= z_domain_top) then; dead_top = .true.; exit
+        else if (.not. liquid_here(zq)) then; dried = .true.; exit; end if
+      end do
+      if (dead_bot) then
         h_fate(h) = HF_DEAD_BOT; occ_lev(h_lev(h)) = occ_lev(h_lev(h)) - 1
-      else if (zq >= z_domain_top) then
+      else if (dead_top) then
         h_fate(h) = HF_DEAD_TOP; occ_lev(h_lev(h)) = occ_lev(h_lev(h)) - 1
-      else if (.not. liquid_here(zq)) then
-        h_z(h)    = zq                          ! desiccates where it arrived
-        h_fate(h) = desiccation_fate(h); occ_lev(h_lev(h)) = occ_lev(h_lev(h)) - 1
+      else if (dried) then
+        h_z(h) = zq                             ! desiccates where it arrived (convection may have
+        ! carried it into/toward the depot); with convection the transport handles the return, so
+        ! cells just desiccate in place (-> DORMANT); without it, use the settling-threshold proxy.
+        if (do_convection) then; h_fate(h) = HF_DESICCATE
+        else;                     h_fate(h) = desiccation_fate(h); end if
+        occ_lev(h_lev(h)) = occ_lev(h_lev(h)) - 1
       else
         h_fate(h) = HF_ALIVE; h_z(h) = zq
         k = col_level(zq)
@@ -695,12 +727,13 @@ contains
           occ_lev(k)        = occ_lev(k) + 1
           h_lev(h)          = k
         end if
-        ! droplet finite lifetime (memoryless): evaporate.  Return-leg test: heavy
-        ! enough to have sedimented to the depot (rain-out) or desiccate in place?
+        ! droplet finite lifetime (memoryless): evaporate.
         p = 1.0_dp - exp(-dt * log(2.0_dp) / host_half_s)
         call random_number(u)
         if (u < p) then
-          h_fate(h) = desiccation_fate(h); occ_lev(h_lev(h)) = occ_lev(h_lev(h)) - 1
+          if (do_convection) then; h_fate(h) = HF_DESICCATE
+          else;                     h_fate(h) = desiccation_fate(h); end if
+          occ_lev(h_lev(h)) = occ_lev(h_lev(h)) - 1
           n_host_die = n_host_die + 1
         end if
       end if
@@ -716,6 +749,7 @@ contains
       case (HF_DESICCATE)
         o_state(i) = ST_DORMANT; o_z(i) = h_z(h)
         o_host(i) = 0; o_rhost(i) = 0.0_dp; o_capac(i) = 0; o_age(i) = 0.0_dp
+        o_uconv(i) = h_uconv(h)                  ! released spore rides the colony's convective parcel
       case (HF_RAINOUT)                          ! sedimented to the haze depot
         o_state(i) = ST_DEPOT; o_z(i) = 0.5_dp * (z_depot_lo + z_depot_hi)
         o_host(i) = 0; o_rhost(i) = 0.0_dp; o_capac(i) = 0; o_age(i) = 0.0_dp
@@ -763,6 +797,7 @@ contains
       if (j == 0) cycle
       h_rhost(j) = r_host; h_capac(j) = capac; h_occ(j) = 1
       h_z(j) = zq; h_lev(j) = k; h_fate(j) = HF_ALIVE
+      if (do_convection) then; call normal_rand(g); h_uconv(j) = g; else; h_uconv(j) = 0.0_dp; end if
       occ_lev(k) = occ_lev(k) + 1
       o_state(i) = ST_ACTIVE; o_host(i) = j; o_rhost(i) = r_host; o_capac(i) = capac
       o_age(i) = 0.0_dp; o_birthstep(i) = this_step

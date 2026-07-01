@@ -21,10 +21,14 @@ program bio_venus_driver
   real(8) :: rcell_um, dt_s, Ydays, seed_lo_km, seed_hi_km
   real(8) :: Aref_m2, X0days, cellhalf_days, hosthalf_days, rhocell_wet
   integer :: rng_seed
+  logical :: do_conv
+  real(8) :: conv_sigma_ms, conv_tau_min, conv_zlo_km, conv_zhi_km, conv_edge_km
+  integer :: conv_nsub_n
   namelist /cloud_run/ indir, src_mode1, src_mode2, src_mode3, phi, &
        do_transport, do_lifecycle, do_evolve, n_spore, rcell_um, dt_s, nsteps, nout, &
        Ydays, seed_lo_km, seed_hi_km, maxorgs, Aref_m2, X0days, cellhalf_days, hosthalf_days, &
-       trait_hist, rhocell_wet, rng_seed
+       trait_hist, rhocell_wet, rng_seed, &
+       do_conv, conv_sigma_ms, conv_tau_min, conv_zlo_km, conv_zhi_km, conv_edge_km, conv_nsub_n
 
   indir   = '../inputs'
   logfile = 'cloud_read.log'
@@ -51,6 +55,13 @@ program bio_venus_driver
   trait_hist    = .false.       ! dump per-snapshot ACTIVE trait histograms (traits_*.csv)
   rhocell_wet   = 1050.0d0      ! hydrated in-droplet cell density [kg/m3] (settling verdict)
   rng_seed      = 0             ! >0 seeds the RNG (ensemble member id); 0 = default sequence
+  do_conv       = .false.       ! layer Vega convective up/downdrafts on the large-scale wind
+  conv_sigma_ms = 0.6d0         ! convective vertical-wind std [m/s] (Vega W_a)
+  conv_tau_min  = 20.0d0        ! convective correlation time [minutes]
+  conv_zlo_km   = 48.0d0        ! convective layer bottom [km] (= depot top; decisive knob)
+  conv_zhi_km   = 55.0d0        ! convective layer top [km]
+  conv_edge_km  = 2.0d0         ! taper half-width at each edge [km]
+  conv_nsub_n   = 20            ! transport sub-steps per biology step
 
   nmlfile = 'bio_cloud.nml'
   if (command_argument_count() >= 1) call get_command_argument(1, nmlfile)
@@ -83,6 +94,13 @@ program bio_venus_driver
   trait_dump  = trait_hist
   rho_cell_wet = rhocell_wet
   if (rng_seed > 0) call set_rng_seed(rng_seed)
+  do_convection = do_conv       ! convection parameterization (bio_cloud_model)
+  conv_sigma    = conv_sigma_ms
+  conv_tau_s    = conv_tau_min * 60.0d0
+  conv_z_lo     = conv_zlo_km  * 1.0d3
+  conv_z_hi     = conv_zhi_km  * 1.0d3
+  conv_edge     = conv_edge_km * 1.0d3
+  conv_nsub     = conv_nsub_n
 
   open(newunit=ulog, file=trim(logfile), status='replace', action='write')
   call cloud_diagnostics(ulog)
