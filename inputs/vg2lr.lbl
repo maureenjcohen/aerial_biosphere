@@ -1,0 +1,108 @@
+PDS_VERSION_ID                     = PDS3
+
+/* FILE CHARACTERISTICS DATA ELEMENTS */
+RECORD_TYPE                        = FIXED_LENGTH
+RECORD_BYTES                       = 49
+FILE_RECORDS                       = 431
+
+/* DATA OBJECT POINTER IDENTIFICATION ELEMENTS */
+^TABLE                             = "VG2LR.DAT"
+
+/* INSTRUMENT AND DETECTOR DESCRIPTIVE DATA ELEMENTS */
+FILE_NAME                          = "VG2LR.DAT"
+DATA_SET_ID                        = "VEGA1/VEGA2-V-2/3-VENUS-V1.0"
+DATA_SET_NAME                      = "VEGA1/VEGA2 VENUS DATA"
+PRODUCT_ID                         = "VG2LR"
+PRODUCT_NAME                       = "VEGA2 LANDER"
+MISSION_NAME                       = "VEGA 2"
+INSTRUMENT_HOST_NAME               = "VEGA 2"
+INSTRUMENT_HOST_ID                 = VEGA2
+MISSION_PHASE_NAME                 = "N/A"
+PRODUCT_TYPE                       = RDR
+START_TIME                         = 1985-06-15T02:06:16
+STOP_TIME                          = 1985-06-15T03:07:49
+
+PRODUCER_ID                        = "VEGA TEAM"
+PRODUCER_FULL_NAME                 = "RALPH LORENZ"
+PRODUCER_INSTITUTION_NAME          = "JOHNS HOPKINS UNIVERSITY APPLIED
+                                      PHYSICS LABORATORY"
+TARGET_NAME                        = "VENUS"
+
+/* INSTRUMENT DESCRIPTION */
+INSTRUMENT_ID                      = "VG2LR"
+INSTRUMENT_NAME                    = "VEGA2 LANDER METEO"
+INSTRUMENT_TYPE                    = "METEOROLOGY"
+
+
+
+/* DATA OBJECT DEFINITION */
+OBJECT                             = TABLE
+ INTERCHANGE_FORMAT                = ASCII
+ ROWS                              = 431
+ COLUMNS                           = 5
+ ROW_BYTES                         = 49
+ DESCRIPTION                       = "VEGA Lander 2 Atmosphere Profile"
+
+
+
+ OBJECT                           = COLUMN
+  COLUMN_NUMBER                   = 1
+  NAME                            = "Record Number"
+  UNIT                            = "N/A"
+  DATA_TYPE                       = ASCII_INTEGER
+  START_BYTE                      = 3
+  BYTES                           = 3
+  FORMAT                          = "I3"
+  DESCRIPTION                     = "Record number"
+ END_OBJECT                       = COLUMN
+
+
+
+ OBJECT                           = COLUMN
+  COLUMN_NUMBER                   = 2
+  NAME                            = "Time"
+  UNIT                            = "SECONDS"
+  DATA_TYPE                       = ASCII_REAL
+  START_BYTE                      = 10
+  BYTES                           = 6
+  FORMAT                          = "F6.1"
+  DESCRIPTION                     = "Time in seconds"
+ END_OBJECT                       = COLUMN
+
+ OBJECT                           = COLUMN
+  COLUMN_NUMBER                   = 3
+  NAME                            = "Pressure"
+  UNIT                            = "BAR"
+  DATA_TYPE                       = ASCII_REAL
+  START_BYTE                      = 20
+  BYTES                           = 6
+  FORMAT                          = "F6.3"
+  DESCRIPTION                     = "Pressure in bars"
+ END_OBJECT                       = COLUMN
+
+
+ OBJECT                           = COLUMN
+  COLUMN_NUMBER                   = 4
+  NAME                            = "Temperature"
+  UNIT                            = "K"
+  DATA_TYPE                       = ASCII_REAL
+  START_BYTE                      = 29
+  BYTES                           = 6
+  FORMAT                          = "F6.2"
+  DESCRIPTION                     = "Temperature in Kelvins"
+ END_OBJECT                       = COLUMN
+
+
+ OBJECT                           = COLUMN
+  COLUMN_NUMBER                   = 5
+  NAME                            = "Altitude"
+  UNIT                            = "M"
+  DATA_TYPE                       = ASCII_REAL
+  START_BYTE                      = 40
+  BYTES                           = 8
+  FORMAT                          = "F8.2"
+  DESCRIPTION                     = "Reconstructed altitude"
+ END_OBJECT                       = COLUMN
+
+END_OBJECT                         = TABLE
+END

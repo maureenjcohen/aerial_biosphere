@@ -1,0 +1,346 @@
+PDS_VERSION_ID                     = PDS3
+
+/* FILE CHARACTERISTICS DATA ELEMENTS */
+RECORD_TYPE                        = FIXED_LENGTH
+RECORD_BYTES                       = 130
+FILE_RECORDS                       = 2040
+
+/* DATA OBJECT POINTER IDENTIFICATION ELEMENTS */
+^TABLE                             = "VG1BL_RDR.DAT"
+
+/* INSTRUMENT AND DETECTOR DESCRIPTIVE DATA ELEMENTS */
+FILE_NAME                          = "VG1_BLRDR.DAT"
+DATA_SET_ID                        = "VEGA1/VEGA2-V-2/3-VENUS-V1.0"
+DATA_SET_NAME                      = "VEGA1/VEGA2 VENUS DATA"
+PRODUCT_ID                         = "VG1BL_LEV3"
+PRODUCT_NAME                       = "VEGA1 BALLOON LEVEL 3"
+MISSION_NAME                       = "VEGA 1"
+INSTRUMENT_HOST_NAME               = "VEGA 1"
+INSTRUMENT_HOST_ID                 = VEGA1
+MISSION_PHASE_NAME                 = "N/A"
+PRODUCT_TYPE                       = RDR
+START_TIME                         = 1985-06-11T02:17:12
+STOP_TIME                          = 1985-06-12T21:01:02
+SPACECRAFT_CLOCK_START_COUNT       = "8232"
+SPACECRAFT_CLOCK_STOP_COUNT        = "162062.7"
+
+PRODUCER_ID                        = "VEGA TEAM"
+PRODUCER_FULL_NAME                 = "RALPH LORENZ"
+PRODUCER_INSTITUTION_NAME          = "JOHNS HOPKINS UNIVERSITY APPLIED
+                                      PHYSICS LABORATORY"
+TARGET_NAME                        = "VENUS"
+
+/* INSTRUMENT DESCRIPTION */
+INSTRUMENT_ID                      = "VG1BL"
+INSTRUMENT_NAME                    = "VEGA 1 BALLOON"
+INSTRUMENT_TYPE                    = "METEOROLOGY"
+
+NOTE                               = "
+Note on Local Solar Time during the VEGA Missions at Venus
+
+Ralph Lorenz
+1/2/2018
+
+To a first order, the balloon drift can be considered linear
+with time from mission start. Thus the VEGA-1 longitude as a
+ function of time t(hrs) can be written L1=176.9-2.216t
+The solar longitude (from the JPL Horizons ephemeris system)
+is  LS1=3.1+0.127t.  From the difference in solar and balloon 
+longitude we can compute the local solar time LST1=0.4+0.156t, 
+and thus the mission started just after midnight, and at the
+end of the mission (t=48.6hrs)  LST1=8.03  (i.e. 8:02am).
+
+Similarly, L2=180-2.12t, LS2=15.3+0.127t and hence
+LST2=1.01+0.15t   (i.e. 1am LST balloon start [and VEGA-2 
+lander descent], and ~08:20 hrs end at t=48.6hrs).
+
+As a check, Andreev et al. (NASA TM-88516, p.45) list the
+(balloon/lander -relative) longitude of the terminator 
+at the start of the VEGA-1 mission as -84.6 degrees   (VEGA-2,
+-75.4 degrees)  and passage of the balloon across the 
+terminator (i.e. 6am) at 36hrs20min into the mission for VEGA-1 and 
+33hrs10 min for VEGA-2.   The end-of-mission balloon-relative
+terminator longitudes were 30.3 and 35 degrees, respectively.
+Thus the last communications sessions took place at about 
+8am local solar time.
+"
+
+
+/* DATA OBJECT DEFINITION */
+OBJECT                             = TABLE
+ INTERCHANGE_FORMAT                = ASCII
+ ROWS                              = 2040
+ COLUMNS                           = 23
+ ROW_BYTES                         = 130
+ DESCRIPTION                       = "VEGA Balloon 1 Data"
+
+ OBJECT                           = COLUMN
+  COLUMN_NUMBER                   = 1
+  NAME                            = "Time"
+  UNIT                            = "SECONDS"
+  DATA_TYPE                       = ASCII_REAL
+  START_BYTE                      = 3
+  BYTES                           = 9
+  FORMAT                          = "F9.2"
+  DESCRIPTION                     = "Time since UT 0.00 on Jun 11, 1985"
+ END_OBJECT                       = COLUMN
+
+ OBJECT                           = COLUMN
+  COLUMN_NUMBER                   = 2
+  NAME                            = "Pressure"
+  UNIT                            = "hPa"
+  DATA_TYPE                       = ASCII_REAL
+  START_BYTE                      = 14
+  BYTES                           = 6
+  FORMAT                          = "F6.2"
+  DESCRIPTION                     = "Pressure in hPa"
+ END_OBJECT                       = COLUMN
+
+ OBJECT                           = COLUMN
+  COLUMN_NUMBER                   = 3
+  NAME                            = "FLAG"
+  UNIT                            = "n/a"
+  DATA_TYPE                       = ASCII_INTEGER
+  START_BYTE                      = 21
+  BYTES                           = 1
+  FORMAT                          = "I1"
+  DESCRIPTION                     = "Data quality flag for previous column. 
+              0 indicates no data; 1 indicates erroneous data (downlink problems 
+              etc.  2 or 3 indicate good data, but some uncertainties in 
+              decommutation. 4 indicates high quality "
+ END_OBJECT                       = COLUMN
+
+ OBJECT                           = COLUMN
+  COLUMN_NUMBER                   = 4
+  NAME                            = "Atmospheric Temperature"
+  UNIT                            = "K"
+  DATA_TYPE                       = ASCII_REAL
+  START_BYTE                      = 24
+  BYTES                           = 6
+  FORMAT                          = "F6.2"
+  DESCRIPTION                     = "Atmospheric Temperature"
+ END_OBJECT                       = COLUMN
+
+ OBJECT                           = COLUMN
+  COLUMN_NUMBER                   = 5
+  NAME                            = "FLAG"
+  UNIT                            = "n/a"
+  DATA_TYPE                       = ASCII_INTEGER
+  START_BYTE                      = 31
+  BYTES                           = 1
+  FORMAT                          = "I1"
+  DESCRIPTION                     = "Data quality flag for previous column. 
+              0 indicates no data; 1 indicates erroneous data (downlink problems 
+              etc.  2 or 3 indicate good data, but some uncertainties in 
+              decommutation. 4 indicates high quality "
+ END_OBJECT                       = COLUMN
+
+ OBJECT                           = COLUMN
+  COLUMN_NUMBER                   = 6
+  NAME                            = "Entropy"
+  UNIT                            = "J/K"
+  DATA_TYPE                       = ASCII_REAL
+  START_BYTE                      = 34
+  BYTES                           = 8
+  FORMAT                          = "F8.5"
+  DESCRIPTION                     = "Derived Quantity S/R - see CRISP1990"
+ END_OBJECT                       = COLUMN
+
+
+ OBJECT                           = COLUMN
+  COLUMN_NUMBER                   = 7
+  NAME                            = "FLAG"
+  UNIT                            = "n/a"
+  DATA_TYPE                       = ASCII_INTEGER
+  START_BYTE                      = 43
+  BYTES                           = 1
+  FORMAT                          = "I1"
+  DESCRIPTION                     = "Data quality flag for previous column. 
+              0 indicates no data; 1 indicates erroneous data (downlink problems 
+              etc.  2 or 3 indicate good data, but some uncertainties in 
+              decommutation. 4 indicates high quality "
+ END_OBJECT                       = COLUMN
+
+ OBJECT                           = COLUMN
+  COLUMN_NUMBER                   = 8
+  NAME                            = "Nephelometer Backscatter"
+  UNIT                            = "10^-8 /M/SR"
+  DATA_TYPE                       = ASCII_REAL
+  START_BYTE                      = 46
+  BYTES                           = 6
+  FORMAT                          = "F6.0"
+  DESCRIPTION                     = "Cloud backscatter cross section. 
+                                     Divide by 1E8 to get /m/sr"
+ END_OBJECT                       = COLUMN
+
+ OBJECT                           = COLUMN
+  COLUMN_NUMBER                   = 9
+  NAME                            = "FLAG"
+  UNIT                            = "n/a"
+  DATA_TYPE                       = ASCII_INTEGER
+  START_BYTE                      = 53
+  BYTES                           = 1
+  FORMAT                          = "I1"
+  DESCRIPTION                     = "Data quality flag as above"
+ END_OBJECT                       = COLUMN
+
+ OBJECT                           = COLUMN
+  COLUMN_NUMBER                   = 10
+  NAME                            = "Radius"
+  UNIT                            = "KM"
+  DATA_TYPE                       = ASCII_REAL
+  START_BYTE                      = 56
+  BYTES                           = 8
+  FORMAT                          = "F8.3"
+  DESCRIPTION                     = "Distance from Planet center,
+                         used in VLBI/Doppler recovery of position"
+ END_OBJECT                       = COLUMN
+
+ OBJECT                           = COLUMN
+  COLUMN_NUMBER                   = 11
+  NAME                            = "FLAG"
+  UNIT                            = "n/a"
+  DATA_TYPE                       = ASCII_INTEGER
+  START_BYTE                      = 65
+  BYTES                           = 1
+  FORMAT                          = "I1"
+  DESCRIPTION                     = "Data quality flag as above"
+ END_OBJECT                       = COLUMN
+
+ OBJECT                           = COLUMN
+  COLUMN_NUMBER                   = 12
+  NAME                            = "Latitude"
+  UNIT                            = "RADIANS"
+  DATA_TYPE                       = ASCII_REAL
+  START_BYTE                      = 69
+  BYTES                           = 9
+  FORMAT                          = "F9.7"
+  DESCRIPTION                     = "Estimated Latitude"
+ END_OBJECT                       = COLUMN
+
+ OBJECT                           = COLUMN
+  COLUMN_NUMBER                   = 13
+  NAME                            = "FLAG"
+  UNIT                            = "n/a"
+  DATA_TYPE                       = ASCII_INTEGER
+  START_BYTE                      = 79
+  BYTES                           = 1
+  FORMAT                          = "I1"
+  DESCRIPTION                     = "Data quality flag as above"
+ END_OBJECT                       = COLUMN
+
+ OBJECT                           = COLUMN
+  COLUMN_NUMBER                   = 14
+  NAME                            = "Longitude"
+  UNIT                            = "RADIANS"
+  DATA_TYPE                       = ASCII_REAL
+  START_BYTE                      = 83
+  BYTES                           = 9
+  FORMAT                          = "F9.7"
+  DESCRIPTION                     = "Estimated Longitude"
+ END_OBJECT                       = COLUMN
+
+ OBJECT                           = COLUMN
+  COLUMN_NUMBER                   = 15
+  NAME                            = "FLAG"
+  UNIT                            = "n/a"
+  DATA_TYPE                       = ASCII_INTEGER
+  START_BYTE                      = 93
+  BYTES                           = 1
+  FORMAT                          = "I1"
+  DESCRIPTION                     = "Data quality flag as above"
+ END_OBJECT                       = COLUMN
+
+ OBJECT                           = COLUMN
+  COLUMN_NUMBER                   = 16
+  NAME                            = "U"
+  UNIT                            = "M/S"
+  DATA_TYPE                       = ASCII_REAL
+  START_BYTE                      = 96
+  BYTES                           = 6
+  FORMAT                          = "F6.2"
+  DESCRIPTION                     = "Zonal Wind Speed"
+ END_OBJECT                       = COLUMN
+
+ OBJECT                           = COLUMN
+  COLUMN_NUMBER                   = 17
+  NAME                            = "FLAG"
+  UNIT                            = "n/a"
+  DATA_TYPE                       = ASCII_INTEGER
+  START_BYTE                      = 103
+  BYTES                           = 1
+  FORMAT                          = "I1"
+  DESCRIPTION                     = "Data quality flag as above"
+ END_OBJECT                       = COLUMN
+
+ OBJECT                           = COLUMN
+  COLUMN_NUMBER                   = 18
+  NAME                            = "V"
+  UNIT                            = "M/S"
+  DATA_TYPE                       = ASCII_REAL
+  START_BYTE                      = 106
+  BYTES                           = 5
+  FORMAT                          = "F5.2"
+  DESCRIPTION                     = "Meridional Wind Speed"
+ END_OBJECT                       = COLUMN
+
+ OBJECT                           = COLUMN
+  COLUMN_NUMBER                   = 19
+  NAME                            = "FLAG"
+  UNIT                            = "n/a"
+  DATA_TYPE                       = ASCII_INTEGER
+  START_BYTE                      = 112
+  BYTES                           = 1
+  FORMAT                          = "I1"
+  DESCRIPTION                     = "Data quality flag as above"
+ END_OBJECT                       = COLUMN
+
+ OBJECT                           = COLUMN
+  COLUMN_NUMBER                   = 20
+  NAME                            = "W_a"
+  UNIT                            = "M/S"
+  DATA_TYPE                       = ASCII_REAL
+  START_BYTE                      = 114
+  BYTES                           = 5
+  FORMAT                          = "F5.2"
+  DESCRIPTION                     = "Vertical Wind speed indicated by 
+                                     Anemometer"
+ END_OBJECT                       = COLUMN
+
+ OBJECT                           = COLUMN
+  COLUMN_NUMBER                   = 21
+  NAME                            = "FLAG"
+  UNIT                            = "n/a"
+  DATA_TYPE                       = ASCII_INTEGER
+  START_BYTE                      = 120
+  BYTES                           = 1
+  FORMAT                          = "I1"
+  DESCRIPTION                     = "Data quality flag as above"
+ END_OBJECT                       = COLUMN
+
+ OBJECT                           = COLUMN
+  COLUMN_NUMBER                   = 22
+  NAME                            = "W_b"
+  UNIT                            = "M/S"
+  DATA_TYPE                       = ASCII_REAL
+  START_BYTE                      = 122
+  BYTES                           = 5
+  FORMAT                          = "F5.2"
+  DESCRIPTION                     = "Modeled true vertical speed of balloon"
+ END_OBJECT                       = COLUMN
+
+ OBJECT                           = COLUMN
+  COLUMN_NUMBER                   = 23
+  NAME                            = "FLAG"
+  UNIT                            = "n/a"
+  DATA_TYPE                       = ASCII_INTEGER
+  START_BYTE                      = 128
+  BYTES                           = 1
+  FORMAT                          = "I1"
+  DESCRIPTION                     = "Data quality flag as above"
+ END_OBJECT                       = COLUMN
+
+
+
+END_OBJECT                         = TABLE
+END
